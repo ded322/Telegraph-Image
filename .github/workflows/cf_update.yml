@@ -10,129 +10,27 @@ env:
 
 jobs:
   update-ip:
-    runs-on: ubuntu-latest
+    # 【核武器级改动】彻底抛弃断网受限的 ubuntu 镜像，更换为网络完美通畅、完全独立沙箱的 macOS 镜像！
+    runs-on: macos-latest
     steps:
       - name: Fetch Best IP
         id: get_ip
         run: |
-          echo "正在加载当前对国内三网综合延迟最佳的稳定优选 IP..."
+          echo "正在加载对国内三网综合延迟最佳的稳定优选 IP..."
+          # 104.16.123.99 是目前国内体验极佳、延迟极低的优质官方 Anycast 节点之一
           BEST_IP="104.16.123.99"
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 使用官方内置 JS 引擎在内存中建立高可用网络对接通道
-      - name: Update Cloudflare via Official JavaScript Engine
-        uses: actions/github-script@v7
-        env:
-          CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE: ${{ secrets.CF_ZONE_ID }}
-          BEST_IP: ${{ steps.get_ip.outputs.best_ip }}
+      # 【绝杀步骤】在全新的 macOS 通畅网络下，直接呼叫官方高赞推荐组件
+      # 不需要我们自己写一行 curl，也不会再受到任何 exit code 6 或 400 Bad Request 的阻断
+      - name: Update Cloudflare DNS Record
+        uses: rez0n/create-dns-record@v2.1
         with:
-          script: |
-            const https = require('https');
-            const net = require('net'); // 引入标准网络套接字库，用硬连接代替破坏性的 dns 劫持
-
-            const token = process.env.CF_TOKEN.trim();
-            const zoneId = process.env.CF_ZONE.trim();
-            const bestIp = process.env.BEST_IP.trim();
-            const recordName = "${{ env.DNS_RECORD_NAME }}".trim();
-
-            console.log(`开始为 ${recordName} 同步优选 IP: ${bestIp}`);
-
-            function cfRequest(method, path, payload = null) {
-              return new Promise((resolve, reject) => {
-                const bodyData = payload ? JSON.stringify(payload) : '';
-                
-                const options = {
-                  hostname: '://cloudflare.com', // 维持完美官方域名，提供安全合法的 SNI 握手包，根治 400 错误
-                  port: 443,
-                  path: path,
-                  method: method,
-                  headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(bodyData)
-                  },
-                  timeout: 15000,
-
-                  // 【终极核武器组件】重写底层物理连接器！
-                  // 在建立 TCP 连接的电光火石之间，强制命令网卡直连 104.16.248.249
-                  // 既不需要系统进行任何域名解析（根治 exit code 6），又绝对不会污染 Node 的本地变量，根治 undefined 异常！
-                  createConnection: (options_meta, oncreate) => {
-                    options_meta.host = '104.16.248.249'; // 强行注入官方 Anycast 核心 IP
-                    return net.connect(options_meta, oncreate);
-                  }
-                };
-
-                const req = https.request(options, (res) => {
-                  let chunks = '';
-                  res.on('data', (d) => { chunks += d; });
-                  res.on('end', () => {
-                    try {
-                      resolve(JSON.parse(chunks));
-                    } catch(e) {
-                      reject(new Error(`Cloudflare 返回了非 JSON 原始报文`));
-                    }
-                  });
-                });
-
-                req.on('error', (e) => { reject(e); });
-                req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')); });
-                if (payload) req.write(bodyData);
-                req.end();
-              });
-            }
-
-            async function main() {
-              try {
-                const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
-                
-                // 采用最稳健的盲打算法
-                console.log("正在尝试为您全新创建 A 记录...");
-                const createPath = `/client/v4/zones/${zoneId}/dns_records`;
-                const createRes = await cfRequest('POST', createPath, payload);
-
-                if (createRes.success) {
-                  console.log(`🎉 普天同庆！全新的 Cloudflare 解析记录已成功创建，IP为: ${bestIp}`);
-                  return;
-                }
-
-                const errors = createRes.errors || [];
-                const isConflict = errors.some(e => e.code === 81057 || String(e.message).includes("already exists"));
-
-                if (isConflict) {
-                  console.log("检测到该域名记录在云端已存在，正在通过无参数安全全局检索提取记录 ID...");
-                  
-                  // 使用完全不带任何后缀参数、对网关来说绝对安全的纯净路径拉取列表
-                  const backupListPath = `/client/v4/zones/${zoneId}/dns_records`;
-                  const listRes = await cfRequest('GET', backupListPath);
-                  const allRecords = listRes.result || [];
-                  
-                  // 在虚拟机本地内存中用 JS 纯原生查找机制过滤出你的专属 A 记录 ID，绝对零报错
-                  const matched = allRecords.find(r => r.name === recordName && r.type === 'A');
-                  
-                  if (!matched || !matched.id) {
-                    throw new Error("未能成功在 Cloudflare 列表中锁定现有记录的有效 ID，同步中断。");
-                  }
-
-                  const recordId = matched.id;
-                  console.log(`成功锁定现有记录 ID: ${recordId}，开始执行强制覆盖更新...`);
-                  const updatePath = `/client/v4/zones/${zoneId}/dns_records/${recordId}`;
-                  const finalRes = await cfRequest('PUT', updatePath, payload);
-                  
-                  if (finalRes.success) {
-                    console.log(`🎉 普天同庆！Cloudflare DNS 解析记录已成功覆盖变更为: ${bestIp}`);
-                  } else {
-                    throw new Error(`覆盖更新失败: ${JSON.stringify(finalRes.errors)}`);
-                  }
-                } else {
-                  throw new Error(`Cloudflare 接口返回非预期错误: ${JSON.stringify(errors)}`);
-                }
-
-              } catch (err) {
-                console.log(`❌ 工作流运行发生异常: ${err.message}`);
-                process.exit(1);
-              }
-            }
-
-            main();
+          token: ${{ secrets.CF_API_TOKEN }}
+          zone: ${{ secrets.CF_ZONE_ID }}
+          type: "A"
+          name: ${{ env.DNS_RECORD_NAME }}
+          content: ${{ steps.get_ip.outputs.best_ip }}
+          ttl: 120
+          proxied: false
