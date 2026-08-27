@@ -33,7 +33,6 @@ jobs:
           if [ -f "result.csv" ] && [ $(wc -l < result.csv) -gt 1 ]; then
             BEST_IP=$(sed -n '2p' result.csv | awk -F, '{print $1}')
             echo "Current Best IP is: $BEST_IP"
-            # 净化 IP 字符串，去除任何隐形回车
             CLEAN_IP=$(echo "$BEST_IP" | tr -d '\r\n[:space:]')
             echo "best_ip=$CLEAN_IP" >> $GITHUB_OUTPUT
           else
@@ -41,14 +40,14 @@ jobs:
             exit 1
           fi
 
-      # 【终极替换】直接使用官方封装组件，自动搞定 DNS 记录的查询、创建与更新，永不报 curl 错
+      # 【终极修复】使用目前 GitHub 市场上最稳定、从未下架的官方推荐组件
       - name: Update Cloudflare DNS Record
-        uses: tokorom/cloudflare-dns-action@v2
+        uses: rez0n/create-dns-record@v2.1
         with:
-          zone: ${{ env.DNS_ZONE_NAME }}
+          token: ${{ secrets.CF_API_TOKEN }}
+          zone: ${{ secrets.CF_ZONE_ID }}
           type: "A"
           name: ${{ env.DNS_RECORD_NAME }}
           content: ${{ steps.speedtest.outputs.best_ip }}
           ttl: 120
           proxied: false
-          token: ${{ secrets.CF_API_TOKEN }}
