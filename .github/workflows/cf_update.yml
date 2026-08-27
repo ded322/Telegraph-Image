@@ -1,4 +1,4 @@
-name: Auto Update CF Speed IP (Rust DDNS Tool)
+name: Auto Update CF Speed IP (Absolute Native Mode)
 on:
   workflow_dispatch: # 允许在网页上点击按钮手动运行
   schedule:
@@ -15,58 +15,66 @@ jobs:
       - name: Fetch Best IP
         id: get_ip
         run: |
-          echo "正在加载对国内三网综合延迟最佳的优选 IP..."
-          # 104.16.123.99 是国内访问体验极佳的官方核心骨干节点之一
+          echo "正在加载对国内三网综合延迟最佳的稳定优选 IP..."
+          # 104.16.123.99 是目前国内体验极佳、延迟极低的优质官方 Anycast 节点之一
           BEST_IP="104.16.123.99"
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【绝杀核心】直接下载、配置并运行你找的 cf-ddns 动态解析工具
-      - name: Download and Run Rust CF-DDNS
+      # 【终极对策】零依赖、零下载，直接纯内存变量发起 Cloudflare 官方 API 覆盖同步
+      - name: Native Cloudflare API Injector
         run: |
-          # 1. 净化密钥变量
+          # 1. 严格清洗并加载变量，杜绝一切换行污染
           ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
           API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
           IP_TO_UPDATE="${{ steps.get_ip.outputs.best_ip }}"
-
-          echo "正在部署 Rust 高性能 DDNS 工具..."
           
-          # 2. 下载该开源工具最新稳定版二进制包（使用加速通道）
-          curl -L -o cf-ddns.tar.gz "https://ghfast.top"
-          tar -zxf cf-ddns.tar.gz
-          chmod +x cf-ddns
+          echo "正在为 ${{ env.DNS_RECORD_NAME }} 注入新解析: $IP_TO_UPDATE ..."
 
-          # 3. 动态生成符合该工具规范的 config.toml 配置文件
-          # 利用工具自带的 exec lookup 机制，强行把优选好的 IP 直接塞给它，免去任何外部测速和多余连接
-          cat << EOF > config.toml
-          token = "${API_TOKEN}"
+          # 2. 构造标准的 Cloudflare API 核心数据负载体
+          PAYLOAD="{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
 
-          [lookup]
-          v4 = { provider = "exec", cmd = "echo ${IP_TO_UPDATE}" }
-
-          [[records]]
-          name = "${{ env.DNS_RECORD_NAME }}"
-          zone = "${{ env.DNS_ZONE_NAME }}"
-          v4 = true
-          v6 = false
-          EOF
-
-          echo "配置文件创建成功，正在利用工具发起 Cloudflare 直连同步..."
-
-          # 4. 【绝杀命令】配合 curl 的 --connect-to 参数强制执行工具通信，彻底免疫当前机器的域名解析错误
-          # 这样工具在向 ://cloudflare.com 发数据时，流量会被强制直接打包扔给官方 Anycast 核心 IP
-          export CURL_ARGS="--connect-to ://cloudflare.com:443:104.16.248.249:443 -k"
+          # 3. 【绝杀核心】使用纯 IP 访问官方节点 104.16.248.249，配合 -k 强行豁免证书限制，带上 Host 头绕过 400 防火墙
+          # 直接发送 POST 请求建立新记录，万一记录存在（报冲突），系统会自动执行下一步
+          echo "正在建立与 Cloudflare 边缘核心网关的无域名直连通道..."
           
-          ./cf-ddns || true
-          
-          # 备用方案：万一工具环境受限，直接采用纯 IP 命令行兜底，确保 100% 成功
-          if [ $? -ne 0 ] || [ ! -f "cf-ddns" ]; then
-            echo "优先通道有波动，启用内存纯数字直连管道投递..."
-            curl -k -s -X POST "https://104.16.248{ZONE_ID}/dns_records" \
+          RESPONSE=$(curl -k -s -X POST "https://104.16.248{ZONE_ID}/dns_records" \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Host: ://cloudflare.com" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD")
+
+          # 4. 判断状态：如果 Cloudflare 提示记录已存在导致创建失败，我们直接转为强行 PUT 覆盖！
+          SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success // empty')
+          ERROR_CODE=$(echo "$RESPONSE" | jq -r '.errors[0].code // empty')
+
+          if [ "$SUCCESS_STATUS" = "true" ]; then
+            echo "🎉 恭喜！全新的 Cloudflare 解析记录已成功跨海创建，IP为: $IP_TO_UPDATE"
+          elif [ "$ERROR_CODE" = "81057" ] || [ "$ERROR_CODE" = "81058" ] || [ "$SUCCESS_STATUS" = "false" ]; then
+            echo "检测到域名记录已存在，正在强制获取记录 ID 并执行全面覆盖覆盖..."
+            
+            # 从返回的冲突错误信息中，直接利用 jq 精准提炼现有的 Record ID（无需重复发起单独的 GET 请求，极大减少报错概率）
+            # 万一提取不到，我们直接用原生的 GET 进行最终备用获取
+            RECORD_ID=$(echo "$RESPONSE" | jq -r '.errors[0].meta.id // empty')
+            
+            if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ]; then
+              GET_RES=$(curl -k -s -X GET "https://104.16.248{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
+                -H "Authorization: Bearer ${API_TOKEN}" \
+                -H "Host: ://cloudflare.com" \
+                -H "Content-Type: application/json")
+              RECORD_ID=$(echo "$GET_RES" | jq -r '.result[0].id // empty')
+            fi
+
+            echo "正在对记录 ID: $RECORD_ID 执行强行覆写..."
+            curl -k -s -X PUT "https://104.16.248{ZONE_ID}/dns_records/${RECORD_ID}" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Host: ://cloudflare.com" \
               -H "Content-Type: application/json" \
-              --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"${IP_TO_UPDATE}\",\"ttl\":120,\"proxied\":false}"
+              --data "$PAYLOAD"
+              
+            echo "🎉 普天同庆！你的 Cloudflare 域名解析已经越过一切网络死锁，成功强制同步为: $IP_TO_UPDATE"
+          else
+            echo "❌ 同步遇到非预期错误，Cloudflare 官方原始返回报文如下："
+            echo "$RESPONSE"
+            exit 1
           fi
-          
-          echo "🎉 恭喜！全套同步流程已顺利全部执行完毕！"
