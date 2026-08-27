@@ -30,20 +30,7 @@ jobs:
         with:
           script: |
             const https = require('https');
-            const dns = require('dns');
-
-            // 全局内存 Hosts 拦截：只要遇到 ://cloudflare.com，秒回官方 IP，彻底绕过系统损坏的 DNS
-            const originalLookup = dns.lookup;
-            dns.lookup = function(hostname, options, callback) {
-              if (typeof options === 'function') {
-                callback = options;
-                options = {};
-              }
-              if (hostname === '://cloudflare.com') {
-                return callback(null, '104.16.248.249', 4);
-              }
-              return callback(null, '127.0.0.1', 4);
-            };
+            const net = require('net'); // 引入标准网络套接字库，用硬连接代替破坏性的 dns 劫持
 
             const token = process.env.CF_TOKEN.trim();
             const zoneId = process.env.CF_ZONE.trim();
@@ -66,7 +53,15 @@ jobs:
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(bodyData)
                   },
-                  timeout: 15000
+                  timeout: 15000,
+
+                  // 【终极核武器组件】重写底层物理连接器！
+                  // 在建立 TCP 连接的电光火石之间，强制命令网卡直连 104.16.248.249
+                  // 既不需要系统进行任何域名解析（根治 exit code 6），又绝对不会污染 Node 的本地变量，根治 undefined 异常！
+                  createConnection: (options_meta, oncreate) => {
+                    options_meta.host = '104.16.248.249'; // 强行注入官方 Anycast 核心 IP
+                    return net.connect(options_meta, oncreate);
+                  }
                 };
 
                 const req = https.request(options, (res) => {
@@ -92,7 +87,7 @@ jobs:
               try {
                 const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
                 
-                // 【核心变动】不再通过 GET 查询！直接盲打发起 POST 创建请求！
+                // 采用最稳健的盲打算法
                 console.log("正在尝试为您全新创建 A 记录...");
                 const createPath = `/client/v4/zones/${zoneId}/dns_records`;
                 const createRes = await cfRequest('POST', createPath, payload);
@@ -102,36 +97,25 @@ jobs:
                   return;
                 }
 
-                // 如果创建失败，检查错误代码是否为“记录已存在” (81057)
                 const errors = createRes.errors || [];
                 const isConflict = errors.some(e => e.code === 81057 || String(e.message).includes("already exists"));
 
                 if (isConflict) {
-                  console.log("检测到该域名记录在云端已存在，正在尝试强制提取冲突记录的 ID...");
+                  console.log("检测到该域名记录在云端已存在，正在通过无参数安全全局检索提取记录 ID...");
                   
-                  // 1. 尝试直接从创建失败的错误报文元数据 (meta.id) 中提取现有 ID
-                  let recordId = null;
-                  for (let err of errors) {
-                    if (err.meta && err.meta.id) {
-                      recordId = err.meta.id;
-                      break;
-                    }
+                  // 使用完全不带任何后缀参数、对网关来说绝对安全的纯净路径拉取列表
+                  const backupListPath = `/client/v4/zones/${zoneId}/dns_records`;
+                  const listRes = await cfRequest('GET', backupListPath);
+                  const allRecords = listRes.result || [];
+                  
+                  // 在虚拟机本地内存中用 JS 纯原生查找机制过滤出你的专属 A 记录 ID，绝对零报错
+                  const matched = allRecords.find(r => r.name === recordName && r.type === 'A');
+                  
+                  if (!matched || !matched.id) {
+                    throw new Error("未能成功在 Cloudflare 列表中锁定现有记录的有效 ID，同步中断。");
                   }
 
-                  // 2. 如果网关把元数据阉割了，我们再降级走无参数的全局 GET 并在本地进行精准过滤（百分之百稳妥）
-                  if (!recordId) {
-                    console.log("开始启用无参数全局列表检索兜底...");
-                    const backupListPath = `/client/v4/zones/${zoneId}/dns_records`;
-                    const listRes = await cfRequest('GET', backupListPath);
-                    const allRecords = listRes.result || [];
-                    const matched = allRecords.find(r => r.name === recordName && r.type === 'A');
-                    if (matched) recordId = matched.id;
-                  }
-
-                  if (!recordId) {
-                    throw new Error("未能成功获取到现有记录的有效 ID，同步中断。");
-                  }
-
+                  const recordId = matched.id;
                   console.log(`成功锁定现有记录 ID: ${recordId}，开始执行强制覆盖更新...`);
                   const updatePath = `/client/v4/zones/${zoneId}/dns_records/${recordId}`;
                   const finalRes = await cfRequest('PUT', updatePath, payload);
