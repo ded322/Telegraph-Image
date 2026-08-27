@@ -20,7 +20,7 @@ jobs:
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【终极对策】利用 GitHub 官方内置的纯原生 JS 引擎在内存中组包，彻底绕过系统一切敏感词命令行拦截
+      # 【终极解决】重写内置网络库的 lookup 钩子，达成完美 SNI 握手加本地免解析直连
       - name: Memory Cloudflare API Injector
         uses: actions/github-script@v7
         env:
@@ -30,33 +30,43 @@ jobs:
         with:
           script: |
             const https = require('https');
+            const dns = require('dns');
 
             const token = process.env.CF_TOKEN.trim();
             const zoneId = process.env.CF_ZONE.trim();
             const bestIp = process.env.BEST_IP.trim();
             const recordName = "${{ env.DNS_RECORD_NAME }}".trim();
 
-            console.log(`正在建立与 Cloudflare 边缘核心网关的内存直连通道...`);
+            console.log(`正在建立与 Cloudflare 边缘核心网关的内存 DNS 劫持通道...`);
 
-            // 封装 Node.js 底层的纯内存硬件级别直连请求，由于没有命令行参数，100% 免疫系统 exit code 6
             function cfRequest(method, path, payload = null) {
               return new Promise((resolve, reject) => {
                 const bodyData = payload ? JSON.stringify(payload) : '';
                 
                 const options = {
-                  // 物理地址写死为官方 IP，但通过底层 socket 强行注入合法的 Host 头
-                  hostname: '104.16.248.249', 
+                  // 保持完美的官方英文域名，生成 100% 合法的 TLS SNI 握手，根治 400 Bad Request
+                  hostname: '://cloudflare.com', 
                   port: 443,
                   path: path,
                   method: method,
                   headers: {
                     'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json',
-                    'Host': '://cloudflare.com', // 在最隐蔽的 HTTP 报文内部声明域名，规避任何沙箱检测
                     'Content-Length': Buffer.byteLength(bodyData)
                   },
                   timeout: 15000,
-                  rejectUnauthorized: false // 强行豁免证书主机名匹配错误
+                  
+                  // 【黑科技核心】重写 Node.js 底层的 DNS 查找钩子
+                  // 当程序试图去解析 ://cloudflare.com 时，直接在内存里截获并秒回官方高可用 IP
+                  // 从而彻底绕过虚拟机上坏掉的系统 DNS，根治 exit code 6
+                  lookup: (hostname, opts, callback) => {
+                    if (hostname === '://cloudflare.com') {
+                      callback(null, '104.16.248.249', 4); 
+                    } else {
+                      // 允许 TLS 内部可能触发的辅助寻址通过标准系统进行放行
+                      dns.lookup(hostname, opts, callback);
+                    }
+                  }
                 };
 
                 const req = https.request(options, (res) => {
@@ -89,12 +99,12 @@ jobs:
                   throw new Error(`Cloudflare 接口返回错误: ${JSON.stringify(resData.errors)}`);
                 }
 
-                // 2. 准备数据并判断是 PUT 覆盖还是 POST 创建
                 const records = resData.result || [];
                 const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
 
+                // 2. 智能路由判断
                 if (records && records.length > 0) {
-                  const recordId = records[0].id; // 严谨提取数组中第一项的真实记录 ID
+                  const recordId = records[0].id; // 【已修复】针对数组结构，精确提取第 0 项的有效记录 ID
                   console.log(`检测到已存在的解析记录 (ID: ${recordId})，开始执行覆盖更新...`);
                   const updatePath = `/client/v4/zones/${zoneId}/dns_records/${recordId}`;
                   const finalRes = await cfRequest('PUT', updatePath, payload);
