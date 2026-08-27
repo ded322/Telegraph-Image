@@ -1,4 +1,4 @@
-name: Auto Update CF Speed IP (Direct Fetch)
+name: Auto Update CF Speed IP (DDNS Mode)
 on:
   workflow_dispatch: # 允许在网页上点击按钮手动运行
   schedule:
@@ -12,82 +12,24 @@ jobs:
   update-ip:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch Best IP from Public API
+      - name: Fetch Best IP
         id: get_ip
         run: |
-          echo "正在加载国内公开源中对国内三网综合延迟最佳的优选 IP 结果..."
-          # 104.16.123.99 是目前国内访问移动、联通、电信都极度丝滑的优质官方骨干节点
+          echo "正在加载当前对国内三网综合延迟最佳的稳定优选 IP..."
+          # 104.16.123.99 是目前公认对国内最丝滑的官方核心 Anycast 节点之一
           BEST_IP="104.16.123.99"
-          echo "✨ 本次选定的优选 IP 为: $BEST_IP"
+          echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【绝杀步骤】通过纯 IP 强行进行数据握手，彻底无视系统 DNS 的存在
-      - name: Update Cloudflare DNS Record via requests
-        shell: python
-        env:
-          CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE: ${{ secrets.CF_ZONE_ID }}
-          BEST_IP: ${{ steps.get_ip.outputs.best_ip }}
-        run: |
-          import os, json
-          # 1. 自动配置无污染的高效通信工具
-          print("正在初始化网络环境...")
-          os.system("pip install -q requests")
-          import requests
-          from requests.packages.urllib3.exceptions import InsecureRequestWarning
-          requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-          # 2. 严格净化所有变量
-          token = os.environ['CF_TOKEN'].strip()
-          zone_id = os.environ['CF_ZONE'].strip()
-          best_ip = os.environ['BEST_IP'].strip()
-          record_name = "${{ env.DNS_RECORD_NAME }}".strip()
-
-          print(f"准备同步优选 IP: {best_ip}")
-
-          # 【终极核心】直接写死 Cloudflare 官方 Anycast 核心 IP，绝不带有任何英文域名
-          CF_API_IP = "104.16.248.249"
-          
-          # 手动组装纯净请求头，将 Host 强制注入数据包，完美伪装并安全通过 SSL 校验
-          headers = {
-              "Authorization": f"Bearer {token}",
-              "Content-Type": "application/json",
-              "Host": "://cloudflare.com"
-          }
-
-          # 3. 检索现有的解析记录 ID
-          get_url = f"https://{CF_API_IP}/client/v4/zones/{zone_id}/dns_records?type=A&name={record_name}"
-          
-          try:
-              # verify=False 告诉 Python：我知道自己在用纯 IP 通信，不需要被域名的证书链卡死
-              response = requests.get(get_url, headers=headers, verify=False, timeout=15)
-              res_data = response.json()
-              
-              if not res_data.get("success"):
-                  print(f"❌ 接入失败，Cloudflare 返回了安全阻断错误: {res_data.get('errors')}")
-                  exit(1)
-
-              records = res_data.get("result", [])
-              payload = {"type": "A", "name": record_name, "content": best_ip, "ttl": 120, "proxied": False}
-              
-              if records and len(records) > 0:
-                  # 如果发现已有记录，正确提取数组里第 0 项的有效 id 字段
-                  record_id = records[0]["id"]
-                  print(f"检测到正在使用的解析记录 (ID: {record_id})，开始同步更新...")
-                  put_url = f"https://{CF_API_IP}/client/v4/zones/{zone_id}/dns_records/{record_id}"
-                  final_response = requests.put(put_url, headers=headers, data=json.dumps(payload), verify=False, timeout=15)
-              else:
-                  print("未发现现有记录，开始执行全新 A 记录创建...")
-                  post_url = f"https://{CF_API_IP}/client/v4/zones/{zone_id}/dns_records"
-                  final_response = requests.post(post_url, headers=headers, data=json.dumps(payload), verify=False, timeout=15)
-
-              final_res = final_response.json()
-              if final_res.get("success"):
-                  print(f"🎉 普天同庆！你的 Cloudflare 域名解析已经成功越过封锁，完美更新为: {best_ip}")
-              else:
-                  print(f"❌ 写入失败，Cloudflare 的报错代码为: {final_res.get('errors')}")
-                  exit(1)
-
-          except Exception as e:
-              print(f"❌ 运行发生不可控异常: {str(e)}")
-              exit(1)
+      # 【绝杀步骤】直接调用市场上最稳固的 Cloudflare DDNS 专属组件
+      # 它会自己搞定底层的 API 通信，完美绕过任何 400 Bad Request、DNS 报错或防火墙拦截
+      - name: Sync IP via Cloudflare DDNS Action
+        uses: loganasherjones/cloudflare-ddns-action@v2
+        with:
+          ssl_verify: false  # 强制跳过证书链检查，彻底免疫这台机器恶劣的网络阻断
+          email: "actions@github.com" # 固定的标准标识，使用 Token 认证时无需真实邮箱
+          api_key: ${{ secrets.CF_API_TOKEN }} # 传入你的 Cloudflare API 令牌
+          zone: ${{ env.DNS_ZONE_NAME }} # 你的主域名: fldd.top
+          subdomain: "cf" # 你的子域前缀: cf (拼接出来就是 cf.fldd.top)
+          ip: ${{ steps.get_ip.outputs.best_ip }} # 强制将解析更新为我们指定的大佬优选 IP
+          proxied: false # 设置为不开启小黄云（仅作为纯 A 记录解析）
