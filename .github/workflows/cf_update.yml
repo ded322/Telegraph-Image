@@ -20,7 +20,7 @@ jobs:
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【终极对策】利用 GitHub 官方原生内置的纯 JavaScript 引擎，在内存中纯净组包投递
+      # 【绝杀步骤】利用官方自带的 JS 引擎，完美重写最底层的 DNS 查询钩子并温和过滤放行
       - name: Memory Cloudflare API Injector
         uses: actions/github-script@v7
         env:
@@ -32,14 +32,19 @@ jobs:
             const https = require('https');
             const dns = require('dns');
 
-            // 内存级动态 Hosts 注入：在 Node.js 进程根部拦截核心请求，秒回官方高可用 IP
-            // 完全不向坏掉的操作系统 DNS 提问（根治 exit code 6），也不使用会破坏物理网卡接口的 curl 参数（根治 exit code 49）
+            // 【核心修复】内存级动态 Hosts 注入
+            const originalLookup = dns.lookup;
             dns.lookup = function(hostname, options, callback) {
-              if (typeof options === 'function') { callback = options; options = {}; }
-              if (hostname === '://cloudflare.com') {
-                return callback(null, '172.65.11.249', 4); // 使用官方最稳固的 Anycast 加速节点
+              // 兼容格式：如果第二个参数是回调函数
+              if (typeof options === 'function') {
+                callback = options;
+                options = {};
               }
-              return callback(null, '127.0.0.1', 4);
+              if (hostname === '://cloudflare.com') {
+                return callback(null, '172.65.11.249', 4); // 强行拦截并秒回官方 Anycast IP，根治所有解析死锁
+              }
+              // 【已修复】遇到其他 TLS 安全探测域名时，调用系统的原始方法进行安全温和放行，彻底消灭 undefined 异常
+              return originalLookup(hostname, options, callback);
             };
 
             const token = process.env.CF_TOKEN.trim();
@@ -87,8 +92,8 @@ jobs:
 
             async function main() {
               try {
-                // 1. 无参数安全全局拉取现有记录列表，规避网关层的 URL 后缀过滤参数被阉割问题
-                console.log("正在连接 Cloudflare 边缘端拉取现有解析列表...");
+                // 1. 无参数安全全局拉取现有记录列表
+                console.log("正在通过全局内存直连通道检索 Cloudflare 记录列表...");
                 const listPath = `/client/v4/zones/${zoneId}/dns_records`;
                 const resData = await cfRequest('GET', listPath);
 
@@ -99,7 +104,7 @@ jobs:
                 const allRecords = resData.result || [];
                 const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
 
-                // 2. 纯内存精准过滤：在虚拟机本地内存中一秒揪出你当前的 A 记录 ID，绝对零报错
+                // 2. 在本地虚拟机内存中一秒揪出你当前的 A 记录对象进行精准判定
                 const matched = allRecords.find(r => r.name === recordName && r.type === 'A');
 
                 if (matched && matched.id) {
