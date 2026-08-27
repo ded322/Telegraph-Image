@@ -31,23 +31,65 @@ jobs:
           ./CloudflareST -o result.csv -n 100 -p 1 -url https://v2ex.co
           
           if [ -f "result.csv" ] && [ $(wc -l < result.csv) -gt 1 ]; then
-            BEST_IP=$(sed -n '2p' result.csv | awk -F, '{print $1}')
+            # 严格提取第一行IP并使用 tr 彻底拔除任何可能存在的隐藏换行或空格
+            BEST_IP=$(sed -n '2p' result.csv | awk -F, '{print $1}' | tr -d '\r\n[:space:]')
             echo "Current Best IP is: $BEST_IP"
-            CLEAN_IP=$(echo "$BEST_IP" | tr -d '\r\n[:space:]')
-            echo "best_ip=$CLEAN_IP" >> $GITHUB_OUTPUT
+            echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
           else
             echo "测速未能提取到有效IP，可能是网络连接断开"
             exit 1
           fi
 
-      # 【终极修复】使用目前 GitHub 市场上最稳定、从未下架的官方推荐组件
-      - name: Update Cloudflare DNS Record
-        uses: rez0n/create-dns-record@v2.1
-        with:
-          token: ${{ secrets.CF_API_TOKEN }}
-          zone: ${{ secrets.CF_ZONE_ID }}
-          type: "A"
-          name: ${{ env.DNS_RECORD_NAME }}
-          content: ${{ steps.speedtest.outputs.best_ip }}
-          ttl: 120
-          proxied: false
+      # 【终极解决】使用纯原生 Python 直连 Cloudflare API，杜绝任何第三方组件的传参 Bug
+      - name: Update Cloudflare DNS Record via Python
+        shell: python
+        env:
+          CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE: ${{ secrets.CF_ZONE_ID }}
+          BEST_IP: ${{ steps.speedtest.outputs.best_ip }}
+        run: |
+          import os, json, urllib.request
+
+          # 1. 严格清洗并加载环境变量
+          token = os.environ['CF_TOKEN'].strip()
+          zone_id = os.environ['CF_ZONE'].strip()
+          best_ip = os.environ['BEST_IP'].strip()
+          record_name = "${{ env.DNS_RECORD_NAME }}".strip()
+
+          print(f"正在为 {record_name} 同步优选 IP: {best_ip}")
+
+          # 2. 查询现有的 DNS 记录 ID
+          get_url = f"https://cloudflare.com{zone_id}/dns_records?type=A&name={record_name}"
+          req = urllib.request.Request(get_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+          
+          try:
+              with urllib.request.urlopen(req) as response:
+                  res_data = json.loads(response.read().decode())
+              
+              records = res_data.get("result", [])
+              payload = {"type": "A", "name": record_name, "content": best_ip, "ttl": 120, "proxied": False}
+              
+              if records:
+                  # 如果记录存在，执行更新 (PUT)
+                  record_id = records[0]["id"]
+                  print(f"找到现有解析记录 (ID: {record_id})，正在执行覆盖更新...")
+                  put_url = f"https://cloudflare.com{zone_id}/dns_records/{record_id}"
+                  req_update = urllib.request.Request(put_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="PUT")
+              else:
+                  # 如果记录不存在，执行新建 (POST)
+                  print("未找到解析记录，正在创建新解析...")
+                  post_url = f"https://cloudflare.com{zone_id}/dns_records"
+                  req_update = urllib.request.Request(post_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST")
+              
+              with urllib.request.urlopen(req_update) as response_update:
+                  final_res = json.loads(response_update.read().decode())
+              
+              if final_res.get("success"):
+                  print(f"🎉 恭喜！Cloudflare DNS 解析已成功同步为: {best_ip}")
+              else:
+                  print(f"❌ 更新失败，Cloudflare 返回错误: {final_res.get('errors')}")
+                  exit(1)
+                  
+          except Exception as e:
+              print(f"❌ 脚本执行发生异常: {str(e)}")
+              exit(1)
