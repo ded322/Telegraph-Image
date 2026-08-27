@@ -39,65 +39,48 @@ jobs:
             exit 1
           fi
 
-      # 【绝杀步骤】直接用 Python 在内存中修改 ://cloudflare.com 的路由映射，完全无视系统 DNS
-      - name: Update Cloudflare DNS Record via Python
-        shell: python
-        env:
-          CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE: ${{ secrets.CF_ZONE_ID }}
-          BEST_IP: ${{ steps.speedtest.outputs.best_ip }}
+      # 【终极绝杀】用原生的 curl --connect-to 机制强行直连 Cloudflare API 节点
+      # 104.16.249.249 是 Cloudflare 全球核心 API 服务器的 Anycast 真实 IP
+      - name: Update Cloudflare DNS Record via Native Shell
         run: |
-          import os, json, urllib.request, socket
+          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
+          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
+          IP_TO_UPDATE="${{ steps.speedtest.outputs.best_ip }}"
+          CF_API_IP="104.16.249.249"
 
-          # 1. 严格清洗并加载环境变量
-          token = os.environ['CF_TOKEN'].strip()
-          zone_id = os.environ['CF_ZONE'].strip()
-          best_ip = os.environ['BEST_IP'].strip()
-          record_name = "${{ env.DNS_RECORD_NAME }}".strip()
+          echo "正在为 ${{ env.DNS_RECORD_NAME }} 同步优选 IP: $IP_TO_UPDATE"
 
-          print(f"正在为 {record_name} 同步优选 IP: {best_ip}")
+          # 1. 强制直连真实 IP 查询现有记录
+          RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
+            --connect-to "://cloudflare.com:${CF_API_IP}:443" \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Content-Type: application/json")
 
-          # ==================== 黑科技：DNS 内存劫持核心 ====================
-          # 强行让系统在遇到 ://cloudflare.com 时，直接返回官方高可用 IP，完全不向恶劣的宿主机 DNS 提问！
-          original_getaddrinfo = socket.getaddrinfo
-          def hacked_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-              if host == '://cloudflare.com':
-                  # 172.65.11.249 是 Cloudflare 官方 API 服务的 Anycast IP
-                  return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('172.65.11.249', port))]
-              return original_getaddrinfo(host, port, family, type, proto, flags)
-          socket.getaddrinfo = hacked_getaddrinfo
-          # ================================================================
+          SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success')
+          if [ "$SUCCESS_STATUS" != "true" ]; then
+            echo "❌ 连接 Cloudflare 失败，请检查 API Token 或 Zone ID 是否正确！"
+            echo "$RESPONSE" | jq -r '.errors'
+            exit 1
+          fi
 
-          # 2. 查询现有的 DNS 记录 ID
-          get_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=A&name={record_name}"
-          req = urllib.request.Request(get_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-          
-          try:
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  res_data = json.loads(response.read().decode())
-              
-              records = res_data.get("result", [])
-              payload = {"type": "A", "name": record_name, "content": best_ip, "ttl": 120, "proxied": False}
-              
-              if records and len(records) > 0:
-                  record_id = records[0]["id"]
-                  print(f"找到现有解析记录 (ID: {record_id})，正在执行覆盖更新...")
-                  put_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
-                  req_update = urllib.request.Request(put_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="PUT")
-              else:
-                  print("未找到解析记录，正在创建新解析...")
-                  post_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-                  req_update = urllib.request.Request(post_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST")
-              
-              with urllib.request.urlopen(req_update, timeout=30) as response_update:
-                  final_res = json.loads(response_update.read().decode())
-              
-              if final_res.get("success"):
-                  print(f"🎉 恭喜！Cloudflare DNS 解析已成功同步为: {best_ip}")
-              else:
-                  print(f"❌ 更新失败，Cloudflare 返回错误: {final_res.get('errors')}")
-                  exit(1)
-                  
-          except Exception as e:
-              print(f"❌ 脚本执行发生异常: {str(e)}")
-              exit(1)
+          # 2. 提取解析记录 ID
+          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
+          PAYLOAD="{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
+
+          if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
+            echo "找到现有解析记录 (ID: $RECORD_ID)，正在执行覆盖更新..."
+            curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${RECORD_ID}" \
+              --connect-to "://cloudflare.com:${CF_API_IP}:443" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$PAYLOAD"
+          else
+            echo "未找到解析记录，正在创建新解析..."
+            curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
+              --connect-to "://cloudflare.com:${CF_API_IP}:443" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$PAYLOAD"
+          fi
+
+          echo -e "\n🎉 恭喜！Cloudflare DNS 解析记录已顺利跑通并完成同步！"
