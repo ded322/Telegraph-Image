@@ -12,6 +12,15 @@ jobs:
   update-ip:
     runs-on: ubuntu-latest
     steps:
+      # 【终极根治】直接修改系统的 DNS 配置文件，彻底修复宿主机自带 DNS 瘫痪的问题
+      - name: Fix System DNS
+        run: |
+          echo "正在强行重置系统 DNS 为公共高可用服务器..."
+          sudo sh -c 'echo "nameserver 1.1.1.1" > /etc/resolv.conf'
+          sudo sh -c 'echo "nameserver 8.8.8.8" >> /etc/resolv.conf'
+          echo "系统 DNS 纠正完毕，测试网络解析能力："
+          nslookup ://cloudflare.com || echo "nslookup 工具不可用，继续执行下一步"
+
       - name: Download CloudflareST
         run: |
           URL="https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz"
@@ -48,7 +57,7 @@ jobs:
         run: |
           import os, json, urllib.request
 
-          # 1. 清洗并加载变量
+          # 1. 严格清洗并加载环境变量
           token = os.environ['CF_TOKEN'].strip()
           zone_id = os.environ['CF_ZONE'].strip()
           best_ip = os.environ['BEST_IP'].strip()
@@ -56,46 +65,28 @@ jobs:
 
           print(f"正在为 {record_name} 同步优选 IP: {best_ip}")
 
-          # 【终极根治】定义 Cloudflare 官方权威 Anycast IP，直接绕过宿主机恶劣的 DNS
-          CF_IP = "104.16.248.249"
-          
-          # 通用请求头，强行注入 Host 属性骗过 SSL 证书校验与反向代理
-          headers = {
-              "Authorization": f"Bearer {token}",
-              "Content-Type": "application/json",
-              "Host": "://cloudflare.com"
-          }
-
-          # 2. 查询现有的 DNS 记录 ID
-          get_url = f"https://{CF_IP}/client/v4/zones/{zone_id}/dns_records?type=A&name={record_name}"
-          req = urllib.request.Request(get_url, headers=headers)
+          # 2. 查询现有的 DNS 记录 ID (现在由于 DNS 已修复，可以直接走最安全的原生官方域名通道)
+          get_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=A&name={record_name}"
+          req = urllib.request.Request(get_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
           
           try:
-              # 创建一个忽略 SSL 主机名不匹配的上下文（因为我们用 IP 代替了域名访问）
-              import ssl
-              ctx = ssl.create_default_context()
-              ctx.check_hostname = False
-              ctx.verify_mode = ssl.CERT_NONE
-
-              with urllib.request.urlopen(req, context=ctx) as response:
+              with urllib.request.urlopen(req) as response:
                   res_data = json.loads(response.read().decode())
               
               records = res_data.get("result", [])
               payload = {"type": "A", "name": record_name, "content": best_ip, "ttl": 120, "proxied": False}
               
               if records and len(records) > 0:
-                  # 如果记录存在，执行更新 (PUT)
                   record_id = records[0]["id"]
                   print(f"找到现有解析记录 (ID: {record_id})，正在执行覆盖更新...")
-                  put_url = f"https://{CF_IP}/client/v4/zones/{zone_id}/dns_records/{record_id}"
-                  req_update = urllib.request.Request(put_url, data=json.dumps(payload).encode(), headers=headers, method="PUT")
+                  put_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+                  req_update = urllib.request.Request(put_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="PUT")
               else:
-                  # 如果记录不存在，执行新建 (POST)
                   print("未找到解析记录，正在创建新解析...")
-                  post_url = f"https://{CF_IP}/client/v4/zones/{zone_id}/dns_records"
-                  req_update = urllib.request.Request(post_url, data=json.dumps(payload).encode(), headers=headers, method="POST")
+                  post_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+                  req_update = urllib.request.Request(post_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST")
               
-              with urllib.request.urlopen(req_update, context=ctx) as response_update:
+              with urllib.request.urlopen(req_update) as response_update:
                   final_res = json.loads(response_update.read().decode())
               
               if final_res.get("success"):
