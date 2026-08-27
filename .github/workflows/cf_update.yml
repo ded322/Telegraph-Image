@@ -42,8 +42,9 @@ jobs:
       - name: Fetch DNS Record ID from Cloudflare
         id: cloudflare_meta
         run: |
-          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
-          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
+          # 【彻底净化】严格清除换行符 \r \n 和所有空格，防止污染 URL 导致解析 host 失败
+          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
+          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
           
           RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
             -H "Authorization: Bearer ${API_TOKEN}" \
@@ -72,8 +73,9 @@ jobs:
 
       - name: Update or Create Cloudflare DNS Record
         run: |
-          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
-          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
+          # 【彻底净化】严格清除换行符 \r \n 和所有空格
+          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
+          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
           IP_TO_UPDATE="${{ steps.speedtest.outputs.best_ip }}"
           
           if [ "${{ steps.cloudflare_meta.outputs.record_exists }}" = "true" ]; then
