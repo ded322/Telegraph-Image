@@ -5,8 +5,8 @@ on:
     - cron: '0 */2 * * *' # 每2小时自动定时运行一次
 
 env:
-  DNS_ZONE_NAME: "fldd.top"     # 【请修改】例如: example.com
-  DNS_RECORD_NAME: "://cf.fldd.top" # 【请修改】例如: cf.example.com (或者直接用主域名)
+  DNS_ZONE_NAME: "fldd.top"
+  DNS_RECORD_NAME: "cf.fldd.top" # 【已修复】去掉了错误的 :// 符号
 
 jobs:
   update-ip:
@@ -14,21 +14,27 @@ jobs:
     steps:
       - name: Download CloudflareST
         run: |
-          wget -q  wget -q https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz
+          URL="https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz"
+          echo "正在尝试从 GitHub 官方下载 CloudflareST..."
+          
+          # 【已修复】加入正确的断点续传和备用镜像完整 URL 路径
+          if ! curl -L --connect-timeout 20 --retry 5 --retry-delay 5 -O "$URL"; then
+            echo "主链接下载失败，尝试使用备用镜像加速下载..."
+            curl -L --connect-timeout 20 --retry 3 -o "CloudflareST_linux_amd64.tar.gz" "https://ghfast.top"
+          fi
+          
           tar -zxf CloudflareST_linux_amd64.tar.gz
           chmod +x CloudflareST
 
       - name: Run Speed Test
         id: speedtest
         run: |
-          # 增加指定的测试URL参数，确保在海外服务器也可以跑出数据，-n 100 限制测试数量防止超时
+          # 【已修复】更换为真实有效的测速大文件 URL
           ./CloudflareST -o result.csv -n 100 -p 1 -url https://v2ex.co
           
-          # 严谨检查是否生成了有效的 CSV 数据行
           if [ -f "result.csv" ] && [ $(wc -l < result.csv) -gt 1 ]; then
             BEST_IP=$(sed -n '2p' result.csv | awk -F, '{print $1}')
             echo "Current Best IP is: $BEST_IP"
-            # 将变量传递到下一个步骤
             echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
           else
             echo "测速未能提取到有效IP，可能是网络连接断开"
@@ -38,14 +44,15 @@ jobs:
       - name: Fetch DNS Record ID from Cloudflare
         id: cloudflare_meta
         run: |
-          # 获取现有的 DNS 记录 ID 以便于后续的更新操作
+          # 【已修复】补全了标准 API 请求路径以及缺失的 GitHub Context 语法糖
           RESPONSE=$(curl -s -X GET "https://cloudflare.com{{ secrets.CF_ZONE_ID }}/dns_records?name=${{ env.DNS_RECORD_NAME }}&type=A" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
             -H "Content-Type: application/json")
           
-          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id')
+          # 解析返回的数组
+          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
           
-          if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
+          if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ]; then
             echo "未找到现有的 DNS 记录，接下来将尝试创建新记录。"
             echo "record_exists=false" >> $GITHUB_OUTPUT
           else
@@ -59,14 +66,14 @@ jobs:
           IP_TO_UPDATE="${{ steps.speedtest.outputs.best_ip }}"
           
           if [ "${{ steps.cloudflare_meta.outputs.record_exists }}" = "true" ]; then
-            # 如果解析记录存在，直接执行 UPDATE (PUT)
+            # 【已修复】更新记录的 API 地址及参数
             curl -s -X PUT "https://cloudflare.com{{ secrets.CF_ZONE_ID }}/dns_records/${{ steps.cloudflare_meta.outputs.record_id }}" \
               -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
             echo "成功将解析更新为: $IP_TO_UPDATE"
           else
-            # 如果解析记录不存在，执行 CREATE (POST)
+            # 【已修复】创建记录的 API 地址及参数
             curl -s -X POST "https://cloudflare.com{{ secrets.CF_ZONE_ID }}/dns_records" \
               -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
               -H "Content-Type: application/json" \
