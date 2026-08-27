@@ -12,15 +12,6 @@ jobs:
   update-ip:
     runs-on: ubuntu-latest
     steps:
-      # 【终极根治】直接修改系统的 DNS 配置文件，彻底修复宿主机自带 DNS 瘫痪的问题
-      - name: Fix System DNS
-        run: |
-          echo "正在强行重置系统 DNS 为公共高可用服务器..."
-          sudo sh -c 'echo "nameserver 1.1.1.1" > /etc/resolv.conf'
-          sudo sh -c 'echo "nameserver 8.8.8.8" >> /etc/resolv.conf'
-          echo "系统 DNS 纠正完毕，测试网络解析能力："
-          nslookup ://cloudflare.com || echo "nslookup 工具不可用，继续执行下一步"
-
       - name: Download CloudflareST
         run: |
           URL="https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz"
@@ -48,6 +39,7 @@ jobs:
             exit 1
           fi
 
+      # 【绝杀步骤】直接用 Python 在内存中修改 ://cloudflare.com 的路由映射，完全无视系统 DNS
       - name: Update Cloudflare DNS Record via Python
         shell: python
         env:
@@ -55,7 +47,7 @@ jobs:
           CF_ZONE: ${{ secrets.CF_ZONE_ID }}
           BEST_IP: ${{ steps.speedtest.outputs.best_ip }}
         run: |
-          import os, json, urllib.request
+          import os, json, urllib.request, socket
 
           # 1. 严格清洗并加载环境变量
           token = os.environ['CF_TOKEN'].strip()
@@ -65,12 +57,23 @@ jobs:
 
           print(f"正在为 {record_name} 同步优选 IP: {best_ip}")
 
-          # 2. 查询现有的 DNS 记录 ID (现在由于 DNS 已修复，可以直接走最安全的原生官方域名通道)
+          # ==================== 黑科技：DNS 内存劫持核心 ====================
+          # 强行让系统在遇到 ://cloudflare.com 时，直接返回官方高可用 IP，完全不向恶劣的宿主机 DNS 提问！
+          original_getaddrinfo = socket.getaddrinfo
+          def hacked_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+              if host == '://cloudflare.com':
+                  # 172.65.11.249 是 Cloudflare 官方 API 服务的 Anycast IP
+                  return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('172.65.11.249', port))]
+              return original_getaddrinfo(host, port, family, type, proto, flags)
+          socket.getaddrinfo = hacked_getaddrinfo
+          # ================================================================
+
+          # 2. 查询现有的 DNS 记录 ID
           get_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=A&name={record_name}"
           req = urllib.request.Request(get_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
           
           try:
-              with urllib.request.urlopen(req) as response:
+              with urllib.request.urlopen(req, timeout=30) as response:
                   res_data = json.loads(response.read().decode())
               
               records = res_data.get("result", [])
@@ -86,7 +89,7 @@ jobs:
                   post_url = f"https://://cloudflare.com/client/v4/zones/{zone_id}/dns_records"
                   req_update = urllib.request.Request(post_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST")
               
-              with urllib.request.urlopen(req_update) as response_update:
+              with urllib.request.urlopen(req_update, timeout=30) as response_update:
                   final_res = json.loads(response_update.read().decode())
               
               if final_res.get("success"):
