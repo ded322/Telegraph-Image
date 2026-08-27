@@ -6,7 +6,7 @@ on:
 
 env:
   DNS_ZONE_NAME: "fldd.top"
-  DNS_RECORD_NAME: "cf.fldd.top" # 【已修复】去掉了错误的 :// 符号
+  DNS_RECORD_NAME: "cf.fldd.top"
 
 jobs:
   update-ip:
@@ -17,7 +17,6 @@ jobs:
           URL="https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz"
           echo "正在尝试从 GitHub 官方下载 CloudflareST..."
           
-          # 【已修复】加入正确的断点续传和备用镜像完整 URL 路径
           if ! curl -L --connect-timeout 20 --retry 5 --retry-delay 5 -O "$URL"; then
             echo "主链接下载失败，尝试使用备用镜像加速下载..."
             curl -L --connect-timeout 20 --retry 3 -o "CloudflareST_linux_amd64.tar.gz" "https://ghfast.top"
@@ -29,7 +28,6 @@ jobs:
       - name: Run Speed Test
         id: speedtest
         run: |
-          # 【已修复】更换为真实有效的测速大文件 URL
           ./CloudflareST -o result.csv -n 100 -p 1 -url https://v2ex.co
           
           if [ -f "result.csv" ] && [ $(wc -l < result.csv) -gt 1 ]; then
@@ -44,27 +42,6 @@ jobs:
       - name: Fetch DNS Record ID from Cloudflare
         id: cloudflare_meta
         run: |
-          # 【已修复】补全了标准 API 请求路径以及缺失的 GitHub Context 语法糖
-          RESPONSE=$(curl -s -X GET "https://cloudflare.com{{ secrets.CF_ZONE_ID }}/dns_records?name=${{ env.DNS_RECORD_NAME }}&type=A" \
-            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
-            -H "Content-Type: application/json")
-          
-          # 解析返回的数组
-          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
-          
-          if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ]; then
-            echo "未找到现有的 DNS 记录，接下来将尝试创建新记录。"
-            echo "record_exists=false" >> $GITHUB_OUTPUT
-          else
-            echo "找到现有的 DNS 记录 ID: $RECORD_ID"
-            echo "record_exists=true" >> $GITHUB_OUTPUT
-            echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Fetch DNS Record ID from Cloudflare
-        id: cloudflare_meta
-        run: |
-          # 清理变量中可能存在的换行或首尾空格
           ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
           API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
           
@@ -81,7 +58,7 @@ jobs:
             exit 1
           fi
           
-          # 【已修复】针对数组结构，正确提取 result 数组中第 0 项的 id
+          # 正确提取 result 数组中第 0 项的 id
           RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
           
           if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ]; then
@@ -95,7 +72,6 @@ jobs:
 
       - name: Update or Create Cloudflare DNS Record
         run: |
-          # 净化密钥变量
           ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
           API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
           IP_TO_UPDATE="${{ steps.speedtest.outputs.best_ip }}"
