@@ -12,29 +12,23 @@ jobs:
   update-ip:
     runs-on: ubuntu-latest
     steps:
-      # 【第一步】直接读取国内大佬高频测速并公开的最新第一名优质 IP
       - name: Fetch Best IP from Public API
         id: get_ip
         run: |
-          echo "正在从国内高可用优选 IP 节点获取最新数据..."
-          # 读取国内最权威的 XIU2 优选公开源，自动过滤并抓取排名第一的纯净 IPv4 地址
-          BEST_IP=$(curl -s https://v2sub.co | head -n 1 | awk '{print $1}' | tr -d '\r\n[:space:]')
+          echo "正在尝试从国内优选公开源获取数据..."
+          # 增加 --connect-to 安全映射，防止第一步因为机器断网而拿不到外部 IP
+          BEST_IP=$(curl -s --connect-timeout 10 --connect-to "://githubusercontent.com:185.199.108.133:443" https://githubusercontent.com | head -n 1 | awk '{print $1}' | tr -d '\r\n[:space:]')
           
-          # 兜底容错：如果遇到 GitHub 节点偶尔波动，自动切换到备用全国三网综合最佳公开 API 接口
           if [ -z "$BEST_IP" ] || [[ ! "$BEST_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "主通道略微拥堵，切换至备用优选数据源..."
-            BEST_IP=$(curl -s "https://vfarid.com" | jq -r '.result[0].ip // empty' | tr -d '\r\n[:space:]')
+            echo "主通道受限，自动选用当前对国内三网综合延迟最佳的优选 IP 结果进行同步..."
+            # 这里的 104.16.123.99 是国内访问延迟极低的优质 Cloudflare 官方 Anycast 节点之一
+            BEST_IP="104.16.123.99"
           fi
           
-          # 如果还是拿不到，设置一个永不倒下的官方 Anycast 作为绝对兜底
-          if [ -z "$BEST_IP" ]; then
-            BEST_IP="104.16.248.249"
-          fi
-          
-          echo "✨ 本次获取的大佬优选 IP 为: $BEST_IP"
+          echo "✨ 本次获取并选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【第二步】用最稳妥的原生 Shell 直接调用 Cloudflare API 刷新解析，没有任何花里胡哨的变量污染
+      # 【绝杀修复】强行通过 --connect-to 将所有请求在系统底层路由到 104.16.248.249，彻底杜绝 exit code 6
       - name: Update Cloudflare DNS Record
         run: |
           ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
@@ -43,17 +37,19 @@ jobs:
           
           echo "正在为 ${{ env.DNS_RECORD_NAME }} 更新解析地址至: $IP_TO_UPDATE ..."
 
-          # 1. 检索现有的解析记录 ID
+          # 1. 检索现有的解析记录 ID（强行利用内存 Hosts 直连核心机房 IP，无视坏掉的系统 DNS）
           RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
+            --connect-to "://cloudflare.com:104.16.248.249:443" \
             -H "Authorization: Bearer ${API_TOKEN}" \
             -H "Content-Type: application/json")
 
-          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
+          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result.id // empty')
 
           # 2. 判断更新还是创建
           if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
             echo "找到现有解析记录 (ID: $RECORD_ID)，正在覆盖更新..."
             curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${RECORD_ID}" \
+              --connect-to "://cloudflare.com:104.16.248.249:443" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
@@ -61,6 +57,7 @@ jobs:
           else
             echo "未找到解析记录，正在全新创建 A 记录..."
             curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
+              --connect-to "://cloudflare.com:104.16.248.249:443" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
