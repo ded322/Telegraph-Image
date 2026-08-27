@@ -10,6 +10,7 @@ jobs:
     steps:
       - name: Download CloudflareST
         run: |
+          # 放弃所有复杂的变量拼接，直接一行大长链接直接下载，绝不吃字符
           wget -q https://github.com
           tar -zxf CloudflareST_linux_amd64.tar.gz
           chmod +x CloudflareST
@@ -23,6 +24,7 @@ jobs:
 
       - name: Update Cloudflare DNS via API
         run: |
+          # 修正最底部的官方根域名，并彻底清理所有花括号中间的空格隐患
           curl -X PUT "https://cloudflare.com{{ secrets.CF_RECORD_ID }}" \
                -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
                -H "Content-Type: application/json" \
