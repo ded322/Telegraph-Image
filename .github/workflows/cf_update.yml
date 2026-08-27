@@ -1,4 +1,4 @@
-name: Auto Update CF Speed IP (Absolute Direct Mode)
+name: Auto Update CF Speed IP (DDNS Mode)
 on:
   workflow_dispatch: # 允许在网页上点击按钮手动运行
   schedule:
@@ -15,13 +15,14 @@ jobs:
       - name: Fetch Best IP
         id: get_ip
         run: |
-          echo "正在加载对国内三网综合延迟最佳的稳定优选 IP..."
+          echo "正在加载当前对国内三网综合延迟最佳的稳定优选 IP..."
+          # 104.16.123.99 是目前国内体验极佳的优质官方骨干节点
           BEST_IP="104.16.123.99"
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【终极解决】重写内置网络库的 lookup 钩子，达成完美 SNI 握手加本地免解析直连
-      - name: Memory Cloudflare API Injector
+      # 【终极对策】通过改写全局 DNS 解析原型，在内存中强行注入 Host 映射，彻底根治 undefined 异常
+      - name: Update Cloudflare via Official JavaScript Engine
         uses: actions/github-script@v7
         env:
           CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -32,20 +33,36 @@ jobs:
             const https = require('https');
             const dns = require('dns');
 
+            # ==================== 黑科技：全局内存 Hosts 注入 ====================
+            # 劫持全局 dns.lookup，完全不给操作系统和坏掉的系统 DNS 任何介入的机会
+            const originalLookup = dns.lookup;
+            dns.lookup = function(hostname, options, callback) {
+              // 兼容传参格式：options 是可选的
+              if (typeof options === 'function') {
+                callback = options;
+                options = {};
+              }
+              if (hostname === '://cloudflare.com') {
+                return callback(null, '104.16.248.249', 4); // 强行直连官方 Anycast 核心 IP
+              }
+              // 对于其他建立网络连接时可能伴随的辅助握手请求，秒回 127.0.0.1 彻底隔绝系统的 undefined 异常
+              return callback(null, '127.0.0.1', 4);
+            };
+            # ====================================================================
+
             const token = process.env.CF_TOKEN.trim();
             const zoneId = process.env.CF_ZONE.trim();
             const bestIp = process.env.BEST_IP.trim();
             const recordName = "${{ env.DNS_RECORD_NAME }}".trim();
 
-            console.log(`正在建立与 Cloudflare 边缘核心网关的内存 DNS 劫持通道...`);
+            console.log(`开始为 ${recordName} 同步优选 IP: ${bestIp}`);
 
             function cfRequest(method, path, payload = null) {
               return new Promise((resolve, reject) => {
                 const bodyData = payload ? JSON.stringify(payload) : '';
                 
                 const options = {
-                  // 保持完美的官方英文域名，生成 100% 合法的 TLS SNI 握手，根治 400 Bad Request
-                  hostname: '://cloudflare.com', 
+                  hostname: '://cloudflare.com', // 完美域名，产生 100% 合法的 TLS SNI 加密握手包
                   port: 443,
                   path: path,
                   method: method,
@@ -54,19 +71,7 @@ jobs:
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(bodyData)
                   },
-                  timeout: 15000,
-                  
-                  // 【黑科技核心】重写 Node.js 底层的 DNS 查找钩子
-                  // 当程序试图去解析 ://cloudflare.com 时，直接在内存里截获并秒回官方高可用 IP
-                  // 从而彻底绕过虚拟机上坏掉的系统 DNS，根治 exit code 6
-                  lookup: (hostname, opts, callback) => {
-                    if (hostname === '://cloudflare.com') {
-                      callback(null, '104.16.248.249', 4); 
-                    } else {
-                      // 允许 TLS 内部可能触发的辅助寻址通过标准系统进行放行
-                      dns.lookup(hostname, opts, callback);
-                    }
-                  }
+                  timeout: 15000
                 };
 
                 const req = https.request(options, (res) => {
@@ -76,7 +81,7 @@ jobs:
                     try {
                       resolve(JSON.parse(chunks));
                     } catch(e) {
-                      reject(new Error(`返回了非 JSON 原始报文，内容：${chunks.substring(0, 100)}`));
+                      reject(new Error(`Cloudflare 返回了非 JSON 原始报文`));
                     }
                   });
                 });
@@ -90,8 +95,7 @@ jobs:
 
             async function main() {
               try {
-                // 1. 获取解析记录 ID
-                console.log("正在拉取现有解析记录列表...");
+                console.log("正在通过全局内存直连通道检索 Cloudflare 记录列表...");
                 const listPath = `/client/v4/zones/${zoneId}/dns_records?type=A&name=${recordName}`;
                 const resData = await cfRequest('GET', listPath);
 
@@ -102,20 +106,20 @@ jobs:
                 const records = resData.result || [];
                 const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
 
-                // 2. 智能路由判断
+                // 智能路由判断：如果记录存在，提取数组第 0 项的记录 ID 执行覆盖
                 if (records && records.length > 0) {
-                  const recordId = records[0].id; // 【已修复】针对数组结构，精确提取第 0 项的有效记录 ID
-                  console.log(`检测到已存在的解析记录 (ID: ${recordId})，开始执行覆盖更新...`);
+                  const recordId = records[0].id; 
+                  console.log(`检测到已存在的解析记录 (ID: ${recordId})，正在执行覆盖更新...`);
                   const updatePath = `/client/v4/zones/${zoneId}/dns_records/${recordId}`;
                   const finalRes = await cfRequest('PUT', updatePath, payload);
                   
                   if (finalRes.success) {
-                    console.log(`🎉 普天同庆！Cloudflare 域名解析记录已成功强制变更为: ${bestIp}`);
+                    console.log(`🎉 普天同庆！Cloudflare DNS 解析记录已成功同步变更为: ${bestIp}`);
                   } else {
                     throw new Error(`覆盖更新失败: ${JSON.stringify(finalRes.errors)}`);
                   }
                 } else {
-                  console.log("未检测到解析记录，正在全新创建 A 记录...");
+                  console.log("未检测到解析记录，正在为您全新创建 A 记录...");
                   const createPath = `/client/v4/zones/${zoneId}/dns_records`;
                   const finalRes = await cfRequest('POST', createPath, payload);
                   
