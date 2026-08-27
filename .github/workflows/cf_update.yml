@@ -1,8 +1,8 @@
 name: Auto Update CF Speed IP
 on:
-  workflow_dispatch:
   schedule:
     - cron: '0 */2 * * *'
+  workflow_dispatch:
 
 jobs:
   update-ip:
@@ -10,7 +10,8 @@ jobs:
     steps:
       - name: Download CloudflareST
         run: |
-          wget -q https://github.com
+          # 锁死最稳定的官方具体版本号 v2.2.5，彻底根治 404 exit code 8 报错
+          wget -q https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz
           tar -zxf CloudflareST_linux_amd64.tar.gz
           chmod +x CloudflareST
 
@@ -27,3 +28,4 @@ jobs:
                -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
                -H "Content-Type: application/json" \
                --data "{\"type\":\"A\",\"name\":\"cf.fldd.top\",\"content\":\"${{ env.BEST_IP }}\",\"ttl\":60,\"proxied\":false}"
+
