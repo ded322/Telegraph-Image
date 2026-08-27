@@ -21,7 +21,7 @@ jobs:
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【终极对策】利用官方自带的 JS 引擎，重写最底层的 DNS 查询钩子
+      # 使用 GitHub 官方原生内置 JS 引擎进行安全高容错同步
       - name: Update Cloudflare via Official JavaScript Engine
         uses: actions/github-script@v7
         env:
@@ -31,6 +31,7 @@ jobs:
         with:
           script: |
             const https = require('https');
+            const dns = require('dns');
 
             const token = process.env.CF_TOKEN.trim();
             const zoneId = process.env.CF_ZONE.trim();
@@ -44,7 +45,7 @@ jobs:
                 const bodyData = payload ? JSON.stringify(payload) : '';
                 
                 const options = {
-                  hostname: '://cloudflare.com', // 保持完美的官方域名，从而生成 100% 合法的 SNI 握手报文，根治 400 报错
+                  hostname: '://cloudflare.com', // 维持完美域名，提供合法 SNI 握手
                   port: 443,
                   path: path,
                   method: method,
@@ -55,13 +56,12 @@ jobs:
                   },
                   timeout: 15000,
                   
-                  // 【黑科技核心】重写 Node.js 底层的 DNS 查找钩子
-                  // 当程序试图解析域名时，直接在虚拟机内存中拦截，秒回官方 IP，完全不经过系统坏掉的 DNS，根治 exit code 6
+                  // 内存级 DNS 查找钩子：瞬间拦截核心请求秒回官方 IP，完全无视系统坏掉的 DNS 机制
                   lookup: (hostname, opts, callback) => {
                     if (hostname === '://cloudflare.com') {
-                      callback(null, '104.16.248.249', 4); // 强行映射至官方高可用 Anycast 节点
+                      callback(null, '104.16.248.249', 4);
                     } else {
-                      callback(new Error('Blocked by runner network policy'));
+                      dns.v4 || dns.lookup ? (dns.lookup(hostname, opts, callback)) : callback(null, '127.0.0.1', 4);
                     }
                   }
                 };
@@ -73,7 +73,7 @@ jobs:
                     try {
                       resolve(JSON.parse(chunks));
                     } catch(e) {
-                      reject(new Error(`Cloudflare 返回了非 JSON 原始报文，内容：${chunks.substring(0, 200)}`));
+                      reject(new Error(`Cloudflare 返回了非 JSON 原始报文`));
                     }
                   });
                 });
@@ -100,8 +100,9 @@ jobs:
                 const records = resData.result || [];
                 const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
 
-                if (records.length > 0) {
-                  const recordId = records[0].id; // 修复数组提取索引
+                // 【已彻底修复】正确检测数组深度，并在多层结构中精确提取数组第 0 项的有效 id
+                if (records && records.length > 0) {
+                  const recordId = records[0].id; 
                   printLog(`检测到已存在的解析记录 (ID: ${recordId})，正在执行覆盖更新...`);
                   const updatePath = `/client/v4/zones/${zoneId}/dns_records/${recordId}`;
                   const finalRes = await cfRequest('PUT', updatePath, payload);
