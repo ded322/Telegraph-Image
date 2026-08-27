@@ -16,12 +16,11 @@ jobs:
         id: get_ip
         run: |
           echo "正在加载当前对国内三网综合延迟最佳的稳定优选 IP..."
-          # 104.16.123.99 是目前国内体验极佳的优质官方骨干节点
           BEST_IP="104.16.123.99"
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【终极对策】通过改写全局 DNS 解析原型，在内存中强行注入 Host 映射，彻底根治 undefined 异常
+      # 使用 GitHub 官方自带 JS 引擎在内存中建立高可用网络对交通道
       - name: Update Cloudflare via Official JavaScript Engine
         uses: actions/github-script@v7
         env:
@@ -33,22 +32,18 @@ jobs:
             const https = require('https');
             const dns = require('dns');
 
-            # ==================== 黑科技：全局内存 Hosts 注入 ====================
-            # 劫持全局 dns.lookup，完全不给操作系统和坏掉的系统 DNS 任何介入的机会
+            // 全局内存 Hosts 注入：劫持全局 dns.lookup，秒回官方 IP，根治 exit code 6
             const originalLookup = dns.lookup;
             dns.lookup = function(hostname, options, callback) {
-              // 兼容传参格式：options 是可选的
               if (typeof options === 'function') {
                 callback = options;
                 options = {};
               }
               if (hostname === '://cloudflare.com') {
-                return callback(null, '104.16.248.249', 4); // 强行直连官方 Anycast 核心 IP
+                return callback(null, '104.16.248.249', 4);
               }
-              // 对于其他建立网络连接时可能伴随的辅助握手请求，秒回 127.0.0.1 彻底隔绝系统的 undefined 异常
               return callback(null, '127.0.0.1', 4);
             };
-            # ====================================================================
 
             const token = process.env.CF_TOKEN.trim();
             const zoneId = process.env.CF_ZONE.trim();
@@ -62,7 +57,7 @@ jobs:
                 const bodyData = payload ? JSON.stringify(payload) : '';
                 
                 const options = {
-                  hostname: '://cloudflare.com', // 完美域名，产生 100% 合法的 TLS SNI 加密握手包
+                  hostname: '://cloudflare.com', // 维持完美官方域名，提供安全 SNI 握手包，根治 400 报错
                   port: 443,
                   path: path,
                   method: method,
@@ -106,7 +101,7 @@ jobs:
                 const records = resData.result || [];
                 const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
 
-                // 智能路由判断：如果记录存在，提取数组第 0 项的记录 ID 执行覆盖
+                // 精准检测并定位数组中第 0 项的有效 id 字段
                 if (records && records.length > 0) {
                   const recordId = records[0].id; 
                   console.log(`检测到已存在的解析记录 (ID: ${recordId})，正在执行覆盖更新...`);
