@@ -33,69 +33,22 @@ jobs:
           if [ -f "result.csv" ] && [ $(wc -l < result.csv) -gt 1 ]; then
             BEST_IP=$(sed -n '2p' result.csv | awk -F, '{print $1}')
             echo "Current Best IP is: $BEST_IP"
-            echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
+            # 净化 IP 字符串，去除任何隐形回车
+            CLEAN_IP=$(echo "$BEST_IP" | tr -d '\r\n[:space:]')
+            echo "best_ip=$CLEAN_IP" >> $GITHUB_OUTPUT
           else
             echo "测速未能提取到有效IP，可能是网络连接断开"
             exit 1
           fi
 
-      - name: Fetch DNS Record ID from Cloudflare
-        id: cloudflare_meta
-        run: |
-          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
-          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
-          
-          # 【已修复】强行向系统注入直连 IP，彻底根治 Could not resolve host (exit code 6) 报错
-          RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
-            --resolve "://cloudflare.com:104.18.26.46" \
-            --resolve "://cloudflare.com:104.18.27.46" \
-            -H "Authorization: Bearer ${API_TOKEN}" \
-            -H "Content-Type: application/json")
-          
-          SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success')
-          echo "Cloudflare API 请求成功状态: $SUCCESS_STATUS"
-          
-          if [ "$SUCCESS_STATUS" != "true" ]; then
-            echo "Cloudflare API 返回错误！"
-            echo "$RESPONSE" | jq -r '.errors'
-            exit 1
-          fi
-          
-          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result.id // empty')
-          
-          if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ]; then
-            echo "未找到现有的 DNS 记录，接下来将尝试创建新记录。"
-            echo "record_exists=false" >> $GITHUB_OUTPUT
-          else
-            echo "找到现有的 DNS 记录 ID: $RECORD_ID"
-            echo "record_exists=true" >> $GITHUB_OUTPUT
-            echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update or Create Cloudflare DNS Record
-        run: |
-          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
-          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
-          IP_TO_UPDATE="${{ steps.speedtest.outputs.best_ip }}"
-          
-          if [ "${{ steps.cloudflare_meta.outputs.record_exists }}" = "true" ]; then
-            echo "正在更新解析记录..."
-            # 【已修复】更新 API 加入直连 IP 绑定
-            curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${{ steps.cloudflare_meta.outputs.record_id }}" \
-              --resolve "://cloudflare.com:104.18.26.46" \
-              --resolve "://cloudflare.com:104.18.27.46" \
-              -H "Authorization: Bearer ${API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
-            echo "成功将解析更新为: $IP_TO_UPDATE"
-          else
-            echo "正在创建解析记录..."
-            # 【已修复】创建 API 加入直连 IP 绑定
-            curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
-              --resolve "://cloudflare.com:104.18.26.46" \
-              --resolve "://cloudflare.com:104.18.27.46" \
-              -H "Authorization: Bearer ${API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
-            echo "成功创建新的解析记录，IP为: $IP_TO_UPDATE"
-          fi
+      # 【终极替换】直接使用官方封装组件，自动搞定 DNS 记录的查询、创建与更新，永不报 curl 错
+      - name: Update Cloudflare DNS Record
+        uses: tokorom/cloudflare-dns-action@v2
+        with:
+          zone: ${{ env.DNS_ZONE_NAME }}
+          type: "A"
+          name: ${{ env.DNS_RECORD_NAME }}
+          content: ${{ steps.speedtest.outputs.best_ip }}
+          ttl: 120
+          proxied: false
+          token: ${{ secrets.CF_API_TOKEN }}
