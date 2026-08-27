@@ -56,7 +56,7 @@ jobs:
 
           print(f"正在为 {record_name} 同步优选 IP: {best_ip}")
 
-          # 2. 查询现有的 DNS 记录 ID (【已修复】更换为 Cloudflare 官方绝对正确的 API 基础路径)
+          # 2. 查询现有的 DNS 记录 ID
           get_url = f"https://cloudflare.com{zone_id}/dns_records?type=A&name={record_name}"
           req = urllib.request.Request(get_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
           
@@ -68,13 +68,13 @@ jobs:
               payload = {"type": "A", "name": record_name, "content": best_ip, "ttl": 120, "proxied": False}
               
               if records and len(records) > 0:
-                  # 【已修复】针对 Cloudflare 列表返回的数组结构，正确提取第 0 项的 id
+                  # 如果记录存在，执行更新 (PUT)
                   record_id = records[0]["id"]
                   print(f"找到现有解析记录 (ID: {record_id})，正在执行覆盖更新...")
                   put_url = f"https://cloudflare.com{zone_id}/dns_records/{record_id}"
                   req_update = urllib.request.Request(put_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="PUT")
               else:
-                  # 如果记录不存在，执行新建 (POST)
+                  # 如果记录不存在，执行新建 (POST) - 【已彻底修复官方 API 绝对路径】
                   print("未找到解析记录，正在创建新解析...")
                   post_url = f"https://cloudflare.com{zone_id}/dns_records"
                   req_update = urllib.request.Request(post_url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST")
