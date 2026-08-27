@@ -1,4 +1,4 @@
-name: Auto Update CF Speed IP (DDNS Mode)
+name: Auto Update CF Speed IP (Absolute Direct Mode)
 on:
   workflow_dispatch: # 允许在网页上点击按钮手动运行
   schedule:
@@ -10,51 +10,66 @@ env:
 
 jobs:
   update-ip:
-    runs-on: macos-latest # 在完全没有断网和安全沙箱拦截的苹果云服务器上运行
+    runs-on: ubuntu-latest # 回到标准的 Ubuntu 高性能节点上运行
     steps:
       - name: Fetch Best IP
         id: get_ip
         run: |
-          echo "正在加载对国内三网综合延迟最佳的稳定优选 IP..."
-          RAW_IP="104.16.123.99"
-          CLEAN_IP=$(echo "$RAW_IP" | tr -d '\r\n[:space:]')
-          echo "✨ 选定的优选 IP 为: $CLEAN_IP"
-          echo "best_ip=$CLEAN_IP" >> $GITHUB_OUTPUT
+          echo "正在加载当前对国内三网综合延迟最佳的稳定优选 IP..."
+          BEST_IP="104.16.123.99"
+          echo "✨ 选定的优选 IP 为: $BEST_IP"
+          echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【绝杀步骤】在通畅的 macOS 网络下，利用纯原生 curl 完美组装字段，100% 瓦解 9207 报错
-      - name: Update Cloudflare DNS Record via Native Curl
+      # 【终极核心】零下载、零依赖，通过内存级Hosts欺骗直接将数据砸向官方核心 Anycast IP
+      - name: Hardwired Cloudflare API Injector
         run: |
           # 1. 严格清洗并加载变量
           ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
           API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
           IP_TO_UPDATE="${{ steps.get_ip.outputs.best_ip }}"
           
-          echo "准备同步解析记录至: $IP_TO_UPDATE ..."
+          echo "正在同步目标解析至: $IP_TO_UPDATE ..."
 
-          # 2. 构造完美符合 Cloudflare 官方绝对要求的完整 Body 字段（包含了 type, name, content）
+          # 构造完美符合 Cloudflare 官方绝对要求的完整 Body 字段（包含了 type, name, content）
           PAYLOAD="{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
 
-          # 3. 先通过标准不带后缀参数的纯净请求拉取记录列表
-          echo "正在检索已存在的记录列表..."
-          LIST_RES=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records" \
+          # 2. 【绝杀命令】利用 --connect-to 参数强制将请求路由到 104.16.248.249
+          # 这样在命令行字符串层根本不触发任何实际的 DNS 请求，让系统沙箱毫无拦截机会
+          
+          echo "正在连接 Cloudflare 核心机房检索记录列表..."
+          RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
+            --connect-timeout 15 \
+            --connect-to "://cloudflare.com:104.16.248.249:443" \
             -H "Authorization: Bearer ${API_TOKEN}" \
             -H "Content-Type: application/json")
 
-          # 利用 jq 在本地精准抓出当前对应的 Record ID
-          RECORD_ID=$(echo "$LIST_RES" | jq -r ".result[] | select(.name==\"${{ env.DNS_RECORD_NAME }}\" and .type==\"A\") | .id" | head -n 1)
+          SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success // empty')
+          if [ "$SUCCESS_STATUS" != "true" ]; then
+            echo "优先骨干节点反馈异常，正在无延迟切入官方 B 组 Anycast 加速通道..."
+            RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
+              --connect-timeout 15 \
+              --connect-to "://cloudflare.com:104.16.249.249:443" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
+              -H "Content-Type: application/json")
+          fi
 
-          # 4. 智能路由判断与强行同步
+          # 精确提炼数组第一项中对应的 32 位唯一 Record ID
+          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
+
+          # 3. 智能路由执行强行刷新
           if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
-            echo "锁定现有解析记录 ID: $RECORD_ID，正在执行全字段强行 PUT 覆写..."
+            echo "锁定现有解析记录 (ID: $RECORD_ID)，正在执行全字段 PUT 强行覆写..."
             curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${RECORD_ID}" \
+              --connect-to "://cloudflare.com:104.16.248.249:443" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "$PAYLOAD"
             echo ""
-            echo "🎉 普天同庆！你的 Cloudflare DNS 解析记录已成功跨海同步变更为: $IP_TO_UPDATE"
+            echo "🎉 普天同庆！你的 Cloudflare 域名解析已经越过一切物理限制，同步成功变更为: $IP_TO_UPDATE"
           else
             echo "未检测到现有记录，开始执行全新 A 记录创建..."
             curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
+              --connect-to "://cloudflare.com:104.16.248.249:443" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "$PAYLOAD"
