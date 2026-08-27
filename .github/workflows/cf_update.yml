@@ -14,7 +14,7 @@ jobs:
           tar -zxf CloudflareST_linux_amd64.tar.gz
           chmod +x CloudflareST
 
-      - name: Run Speed Test
+       - name: Run Speed Test
         run: |
           ./CloudflareST -o result.csv -n 200 -p 1
           BEST_IP=$(sed -n '2p' result.csv | awk -F, '{print $1}')
@@ -26,4 +26,4 @@ jobs:
           curl -X PUT "https://cloudflare.com{{ secrets.CF_RECORD_ID }}" \
                -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
                -H "Content-Type: application/json" \
-               --data "{\"type\":\"A\",\"name\":\"cf.fldd.top\",\"content\":\"${{ env.BEST_IP }}\",\"ttl\":60,\"proxied\":false}"
+               --data '{"type":"A","name":"cf.fldd.top","content":"'"${{ env.BEST_IP }}"'","ttl":60,"proxied":false}'
