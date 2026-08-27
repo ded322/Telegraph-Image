@@ -1,0 +1,32 @@
+name: Auto Update CF Speed IP
+on:
+  schedule:
+    - cron: '0 */2 * * *' # 每 2 小时全自动测速更换一次最优 IP
+  workflow_dispatch: # 允许你手动点击按钮随时触发测速
+
+jobs:
+  update-ip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download CloudflareST
+        run: |
+          # 下载最新的 Linux 官方测速工具
+          wget -q https://github.com
+          tar -zxf CloudflareST_linux_amd64.tar.gz
+          chmod +x CloudflareST
+
+      - name: Run Speed Test
+        run: |
+          # 针对中国大陆网络测速，挑出丢包率 0 且延迟最低的 1 个 IP
+          ./CloudflareST -o result.csv -n 200 -p 1
+          BEST_IP=$(sed -n '2p' result.csv | awk -F, '{print $1}')
+          echo "Current Best IP is: $BEST_IP"
+          echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
+
+      - name: Update Cloudflare DNS via API
+        run: |
+          # 调用 Cloudflare 官方接口，把这个最优 IP 强行写入你的 cf.fldd.top 解析记录中
+          curl -X PUT "https://cloudflare.com{{ secrets.CF_ZONE_ID }}/dns_records/${{ secrets.CF_RECORD_ID }}" \
+               -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+               -H "Content-Type: application/json" \
+               --data "{\"type\":\"A\",\"name\":\"cf.fldd.top\",\"content\":\"${{ env.BEST_IP }}\",\"ttl\":60,\"proxied\":false}"
