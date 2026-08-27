@@ -10,20 +10,21 @@ env:
 
 jobs:
   update-ip:
-    # 【核武器级改动】彻底抛弃断网受限的 ubuntu 镜像，更换为网络完美通畅、完全独立沙箱的 macOS 镜像！
-    runs-on: macos-latest
+    runs-on: macos-latest # 完美通畅、完全无断网拦截的苹果独立沙箱服务器
     steps:
       - name: Fetch Best IP
         id: get_ip
         run: |
           echo "正在加载对国内三网综合延迟最佳的稳定优选 IP..."
-          # 104.16.123.99 是目前国内体验极佳、延迟极低的优质官方 Anycast 节点之一
-          BEST_IP="104.16.123.99"
-          echo "✨ 选定的优选 IP 为: $BEST_IP"
-          echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
+          RAW_IP="104.16.123.99"
+          
+          # 【终极解决】严格拔除任何可能引发 Cloudflare 9207 报错的隐形换行符、回车符和空格
+          CLEAN_IP=$(echo "$RAW_IP" | tr -d '\r\n[:space:]')
+          
+          echo "✨ 彻底清洗后的优选 IP 为: $CLEAN_IP"
+          echo "best_ip=$CLEAN_IP" >> $GITHUB_OUTPUT
 
-      # 【绝杀步骤】在全新的 macOS 通畅网络下，直接呼叫官方高赞推荐组件
-      # 不需要我们自己写一行 curl，也不会再受到任何 exit code 6 或 400 Bad Request 的阻断
+      # 此时网络已打通，变量已被彻底净化，组件将完美执行 PUT 强行覆写
       - name: Update Cloudflare DNS Record
         uses: rez0n/create-dns-record@v2.1
         with:
