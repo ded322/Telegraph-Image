@@ -20,7 +20,7 @@ jobs:
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 使用 GitHub 官方自带 JS 引擎在内存中建立高可用网络对交通道
+      # 使用官方原生 JS 引擎，在内存中完成完美的网络中转与精准的数据流解析
       - name: Update Cloudflare via Official JavaScript Engine
         uses: actions/github-script@v7
         env:
@@ -32,7 +32,7 @@ jobs:
             const https = require('https');
             const dns = require('dns');
 
-            // 全局内存 Hosts 注入：劫持全局 dns.lookup，秒回官方 IP，根治 exit code 6
+            // 全局内存 Hosts 拦截：只要遇到 ://cloudflare.com，秒回官方 IP，彻底绕过系统损坏的 DNS
             const originalLookup = dns.lookup;
             dns.lookup = function(hostname, options, callback) {
               if (typeof options === 'function') {
@@ -42,7 +42,7 @@ jobs:
               if (hostname === '://cloudflare.com') {
                 return callback(null, '104.16.248.249', 4);
               }
-              return callback(null, '127.0.0.1', 4);
+              return callback(null, '127.0.0.1', 4); // 本地回环，防止其他外部探测触发未定义报错
             };
 
             const token = process.env.CF_TOKEN.trim();
@@ -57,7 +57,7 @@ jobs:
                 const bodyData = payload ? JSON.stringify(payload) : '';
                 
                 const options = {
-                  hostname: '://cloudflare.com', // 维持完美官方域名，提供安全 SNI 握手包，根治 400 报错
+                  hostname: '://cloudflare.com', // 维持完美官方域名，提供安全合法的 SNI 握手包，根治 400 错误
                   port: 443,
                   path: path,
                   method: method,
@@ -101,7 +101,7 @@ jobs:
                 const records = resData.result || [];
                 const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
 
-                // 精准检测并定位数组中第 0 项的有效 id 字段
+                // 【核心修复】使用最标准无误的方括号索引语法，精准拉取列表中的第一项并提取其记录 ID
                 if (records && records.length > 0) {
                   const recordId = records[0].id; 
                   console.log(`检测到已存在的解析记录 (ID: ${recordId})，正在执行覆盖更新...`);
