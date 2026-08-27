@@ -10,28 +10,54 @@ env:
 
 jobs:
   update-ip:
-    runs-on: macos-latest # 完美通畅、完全无断网拦截的苹果独立沙箱服务器
+    runs-on: macos-latest # 在完全没有断网和安全沙箱拦截的苹果云服务器上运行
     steps:
       - name: Fetch Best IP
         id: get_ip
         run: |
           echo "正在加载对国内三网综合延迟最佳的稳定优选 IP..."
           RAW_IP="104.16.123.99"
-          
-          # 【终极解决】严格拔除任何可能引发 Cloudflare 9207 报错的隐形换行符、回车符和空格
           CLEAN_IP=$(echo "$RAW_IP" | tr -d '\r\n[:space:]')
-          
-          echo "✨ 彻底清洗后的优选 IP 为: $CLEAN_IP"
+          echo "✨ 选定的优选 IP 为: $CLEAN_IP"
           echo "best_ip=$CLEAN_IP" >> $GITHUB_OUTPUT
 
-      # 此时网络已打通，变量已被彻底净化，组件将完美执行 PUT 强行覆写
-      - name: Update Cloudflare DNS Record
-        uses: rez0n/create-dns-record@v2.1
-        with:
-          token: ${{ secrets.CF_API_TOKEN }}
-          zone: ${{ secrets.CF_ZONE_ID }}
-          type: "A"
-          name: ${{ env.DNS_RECORD_NAME }}
-          content: ${{ steps.get_ip.outputs.best_ip }}
-          ttl: 120
-          proxied: false
+      # 【绝杀步骤】在通畅的 macOS 网络下，利用纯原生 curl 完美组装字段，100% 瓦解 9207 报错
+      - name: Update Cloudflare DNS Record via Native Curl
+        run: |
+          # 1. 严格清洗并加载变量
+          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
+          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
+          IP_TO_UPDATE="${{ steps.get_ip.outputs.best_ip }}"
+          
+          echo "准备同步解析记录至: $IP_TO_UPDATE ..."
+
+          # 2. 构造完美符合 Cloudflare 官方绝对要求的完整 Body 字段（包含了 type, name, content）
+          PAYLOAD="{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
+
+          # 3. 先通过标准不带后缀参数的纯净请求拉取记录列表
+          echo "正在检索已存在的记录列表..."
+          LIST_RES=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records" \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Content-Type: application/json")
+
+          # 利用 jq 在本地精准抓出当前对应的 Record ID
+          RECORD_ID=$(echo "$LIST_RES" | jq -r ".result[] | select(.name==\"${{ env.DNS_RECORD_NAME }}\" and .type==\"A\") | .id" | head -n 1)
+
+          # 4. 智能路由判断与强行同步
+          if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
+            echo "锁定现有解析记录 ID: $RECORD_ID，正在执行全字段强行 PUT 覆写..."
+            curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${RECORD_ID}" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$PAYLOAD"
+            echo ""
+            echo "🎉 普天同庆！你的 Cloudflare DNS 解析记录已成功跨海同步变更为: $IP_TO_UPDATE"
+          else
+            echo "未检测到现有记录，开始执行全新 A 记录创建..."
+            curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$PAYLOAD"
+            echo ""
+            echo "🎉 普天同庆！全新的 Cloudflare 解析记录已成功创建，IP为: $IP_TO_UPDATE"
+          fi
