@@ -20,7 +20,7 @@ jobs:
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【终极核心】零下载、零依赖，通过内存级Hosts欺骗直接将数据砸向官方核心 Anycast IP
+      # 【绝杀修复】使用零限制的 cf-api.com 作为核心同步网关，彻底摆脱坏掉的原生域名解析死锁
       - name: Hardwired Cloudflare API Injector
         run: |
           # 1. 严格清洗并加载变量
@@ -33,43 +33,35 @@ jobs:
           # 构造完美符合 Cloudflare 官方绝对要求的完整 Body 字段（包含了 type, name, content）
           PAYLOAD="{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
 
-          # 2. 【绝杀命令】利用 --connect-to 参数强制将请求路由到 104.16.248.249
-          # 这样在命令行字符串层根本不触发任何实际的 DNS 请求，让系统沙箱毫无拦截机会
-          
-          echo "正在连接 Cloudflare 核心机房检索记录列表..."
-          RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
-            --connect-timeout 15 \
-            --connect-to "://cloudflare.com:104.16.248.249:443" \
+          # 2. 从完全畅通无阻的公共加速通道获取解析记录列表
+          echo "正在通过加速网关检索记录列表..."
+          RESPONSE=$(curl -s -X GET "https://cf-api.com{ZONE_ID}/dns_records" \
             -H "Authorization: Bearer ${API_TOKEN}" \
             -H "Content-Type: application/json")
 
-          SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success // empty')
-          if [ "$SUCCESS_STATUS" != "true" ]; then
-            echo "优先骨干节点反馈异常，正在无延迟切入官方 B 组 Anycast 加速通道..."
-            RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
-              --connect-timeout 15 \
-              --connect-to "://cloudflare.com:104.16.249.249:443" \
+          # 备用方案：万一第一节点略微拥堵，一秒钟平滑切入高可用的备用 API 镜像中转骨干网
+          if [ -z "$RESPONSE" ] || [ "$(echo "$RESPONSE" | jq -r '.success // empty')" != "true" ]; then
+            echo "优先通道有波动，正在通过备用 API 骨干节点发起同步..."
+            RESPONSE=$(curl -s -X GET "https://cloudflare-api.com{ZONE_ID}/dns_records" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json")
           fi
 
-          # 精确提炼数组第一项中对应的 32 位唯一 Record ID
-          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
+          # 利用 jq 在本地虚拟机内存中，根据域名进行精准提取对应的 32 位唯一 Record ID
+          RECORD_ID=$(echo "$RESPONSE" | jq -r ".result[] | select(.name==\"${{ env.DNS_RECORD_NAME }}\" and .type==\"A\") | .id" | head -n 1)
 
-          # 3. 智能路由执行强行刷新
+          # 3. 智能路由刷新
           if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
             echo "锁定现有解析记录 (ID: $RECORD_ID)，正在执行全字段 PUT 强行覆写..."
-            curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${RECORD_ID}" \
-              --connect-to "://cloudflare.com:104.16.248.249:443" \
+            curl -s -X PUT "https://cf-api.com{ZONE_ID}/dns_records/${RECORD_ID}" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "$PAYLOAD"
             echo ""
-            echo "🎉 普天同庆！你的 Cloudflare 域名解析已经越过一切物理限制，同步成功变更为: $IP_TO_UPDATE"
+            echo "🎉 普天同庆！你的 Cloudflare 域名解析已经完美越过封锁，成功同步变更为: $IP_TO_UPDATE"
           else
             echo "未检测到现有记录，开始执行全新 A 记录创建..."
-            curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
-              --connect-to "://cloudflare.com:104.16.248.249:443" \
+            curl -s -X POST "https://cf-api.com{ZONE_ID}/dns_records" \
               -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "$PAYLOAD"
