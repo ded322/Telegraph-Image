@@ -1,8 +1,8 @@
 name: Auto Update CF Speed IP
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 */2 * * *'
-  workflow_dispatch:
 
 jobs:
   update-ip:
@@ -22,11 +22,9 @@ jobs:
           echo "Current Best IP is: $BEST_IP"
           echo "BEST_IP=$BEST_IP" >> $GITHUB_ENV
 
-  - name: Update Cloudflare DNS via API
+      - name: Update Cloudflare DNS via API
         run: |
-          # 必须使用 api.cloudflare.com 官方机器人通信接口，且剥离全部花括号空格
           curl -X PUT "https://cloudflare.com{{ secrets.CF_RECORD_ID }}" \
                -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
                -H "Content-Type: application/json" \
                --data "{\"type\":\"A\",\"name\":\"cf.fldd.top\",\"content\":\"${{ env.BEST_IP }}\",\"ttl\":60,\"proxied\":false}"
-
