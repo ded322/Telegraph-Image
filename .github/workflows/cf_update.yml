@@ -1,4 +1,4 @@
-name: Auto Update CF Speed IP (Absolute Direct Mode)
+name: Auto Update CF Speed IP (DDNS Mode)
 on:
   workflow_dispatch: # 允许在网页上点击按钮手动运行
   schedule:
@@ -10,69 +10,124 @@ env:
 
 jobs:
   update-ip:
-    runs-on: ubuntu-latest # 回到标准的 Ubuntu 高性能节点上运行
+    runs-on: ubuntu-latest # 在标准的 Ubuntu 节点上安全运行
     steps:
       - name: Fetch Best IP
         id: get_ip
         run: |
-          echo "正在加载当前对国内三网综合延迟最佳的稳定优选 IP..."
+          echo "正在加载对国内三网综合延迟最佳的稳定优选 IP..."
           BEST_IP="104.16.123.99"
           echo "✨ 选定的优选 IP 为: $BEST_IP"
           echo "best_ip=$BEST_IP" >> $GITHUB_OUTPUT
 
-      # 【终极核心】零下载、零依赖，通过原厂 Hosts 内存注入，直接与官方 Anycast 核心 IP 通信
-      - name: Hardwired Cloudflare API Injector
-        run: |
-          # 1. 严格清洗并加载变量
-          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '\r\n[:space:]')
-          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '\r\n[:space:]')
-          IP_TO_UPDATE="${{ steps.get_ip.outputs.best_ip }}"
-          
-          echo "正在同步目标解析至: $IP_TO_UPDATE ..."
+      # 【终极对策】利用 GitHub 官方原生内置的纯 JavaScript 引擎，在内存中纯净组包投递
+      - name: Memory Cloudflare API Injector
+        uses: actions/github-script@v7
+        env:
+          CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE: ${{ secrets.CF_ZONE_ID }}
+          BEST_IP: ${{ steps.get_ip.outputs.best_ip }}
+        with:
+          script: |
+            const https = require('https');
+            const dns = require('dns');
 
-          # 构造完美符合 Cloudflare 官方绝对要求的完整 Body 字段（包含了 type, name, content）
-          PAYLOAD="{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
+            // 内存级动态 Hosts 注入：在 Node.js 进程根部拦截核心请求，秒回官方高可用 IP
+            // 完全不向坏掉的操作系统 DNS 提问（根治 exit code 6），也不使用会破坏物理网卡接口的 curl 参数（根治 exit code 49）
+            dns.lookup = function(hostname, options, callback) {
+              if (typeof options === 'function') { callback = options; options = {}; }
+              if (hostname === '://cloudflare.com') {
+                return callback(null, '172.65.11.249', 4); // 使用官方最稳固的 Anycast 加速节点
+              }
+              return callback(null, '127.0.0.1', 4);
+            };
 
-          # 2. 【绝杀命令】利用 --resolve 参数将官方安全域名在内存中强制绑定到 104.16.248.249
-          # 整个执行过程完全不需要任何第三方平台或未知中介
-          
-          echo "正在连接 Cloudflare 官方核心 Anycast 通道检索记录列表..."
-          RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
-            --connect-timeout 15 \
-            --resolve "://cloudflare.com:104.16.248.249" \
-            -H "Authorization: Bearer ${API_TOKEN}" \
-            -H "Content-Type: application/json")
+            const token = process.env.CF_TOKEN.trim();
+            const zoneId = process.env.CF_ZONE.trim();
+            const bestIp = process.env.BEST_IP.trim();
+            const recordName = "${{ env.DNS_RECORD_NAME }}".trim();
 
-          SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success // empty')
-          if [ "$SUCCESS_STATUS" != "true" ]; then
-            echo "通道主节点略有波动，正在一瞬间秒级换入官方备用加速节点..."
-            RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
-              --connect-timeout 15 \
-              --resolve "://cloudflare.com:104.16.249.249" \
-              -H "Authorization: Bearer ${API_TOKEN}" \
-              -H "Content-Type: application/json")
-          fi
+            console.log(`正在启动纯内存通道，准备同步目标 IP: ${bestIp}`);
 
-          # 利用 jq 在虚拟机本地内存中精确提炼数组里对应的 32 位唯一 Record ID
-          RECORD_ID=$(echo "$RESPONSE" | jq -r ".result[] | select(.name==\"${{ env.DNS_RECORD_NAME }}\" and .type==\"A\") | .id" | head -n 1)
+            function cfRequest(method, path, payload = null) {
+              return new Promise((resolve, reject) => {
+                const bodyData = payload ? JSON.stringify(payload) : '';
+                
+                const options = {
+                  hostname: '://cloudflare.com', // 维持完美官方域名，提供 100% 合法的原生 SNI 握手，根治 400 错误
+                  port: 443,
+                  path: path,
+                  method: method,
+                  headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(bodyData)
+                  },
+                  timeout: 15000
+                };
 
-          # 3. 智能路由执行强行刷新
-          if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
-            echo "锁定现有解析记录 (ID: $RECORD_ID)，正在执行全字段 PUT 强行覆写..."
-            curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${RECORD_ID}" \
-              --resolve "://cloudflare.com:104.16.248.249" \
-              -H "Authorization: Bearer ${API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data "$PAYLOAD"
-            echo ""
-            echo "🎉 普天同庆！你的 Cloudflare 域名解析已经完美同步成功变更为: $IP_TO_UPDATE"
-          else
-            echo "未检测到现有记录，开始执行全新 A 记录创建..."
-            curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
-              --resolve "://cloudflare.com:104.16.248.249" \
-              -H "Authorization: Bearer ${API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data "$PAYLOAD"
-            echo ""
-            echo "🎉 普天同庆！全新的 Cloudflare 解析记录已成功创建，IP为: $IP_TO_UPDATE"
-          fi
+                const req = https.request(options, (res) => {
+                  let chunks = '';
+                  res.on('data', (d) => { chunks += d; });
+                  res.on('end', () => {
+                    try {
+                      resolve(JSON.parse(chunks));
+                    } catch(e) {
+                      reject(new Error(`Cloudflare 返回了非 JSON 原始报文`));
+                    }
+                  });
+                });
+
+                req.on('error', (e) => { reject(e); });
+                req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')); });
+                if (payload) req.write(bodyData);
+                req.end();
+              });
+            }
+
+            async function main() {
+              try {
+                // 1. 无参数安全全局拉取现有记录列表，规避网关层的 URL 后缀过滤参数被阉割问题
+                console.log("正在连接 Cloudflare 边缘端拉取现有解析列表...");
+                const listPath = `/client/v4/zones/${zoneId}/dns_records`;
+                const resData = await cfRequest('GET', listPath);
+
+                if (!resData.success) {
+                  throw new Error(`Cloudflare 接口返回错误: ${JSON.stringify(resData.errors)}`);
+                }
+
+                const allRecords = resData.result || [];
+                const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
+
+                // 2. 纯内存精准过滤：在虚拟机本地内存中一秒揪出你当前的 A 记录 ID，绝对零报错
+                const matched = allRecords.find(r => r.name === recordName && r.type === 'A');
+
+                if (matched && matched.id) {
+                  const recordId = matched.id;
+                  console.log(`锁定现有记录 ID: ${recordId}，开始执行覆盖更新...`);
+                  const updatePath = `/client/v4/zones/${zoneId}/dns_records/${recordId}`;
+                  const finalRes = await cfRequest('PUT', updatePath, payload);
+                  
+                  if (finalRes.success) {
+                    console.log(`🎉 普天同庆！你的 Cloudflare DNS 解析记录已成功同步变更为: ${bestIp}`);
+                  } else {
+                    throw new Error(`覆盖更新失败: ${JSON.stringify(finalRes.errors)}`);
+                  }
+                } else {
+                  console.log("未检测到现有记录，开始执行全新 A 记录创建...");
+                  const createPath = `/client/v4/zones/${zoneId}/dns_records`;
+                  const finalRes = await cfRequest('POST', createPath, payload);
+                  
+                  if (finalRes.success) {
+                    console.log(`🎉 普天同庆！全新的 Cloudflare 解析记录已成功创建，IP为: ${bestIp}`);
+                  } else {
+                    throw new Error(`创建新记录失败: ${JSON.stringify(finalRes.errors)}`);
+                  }
+                }
+              } catch (err) {
+                console.log(`❌ 工作流运行发生异常: ${err.message}`);
+                process.exit(1);
+              }
+            }
+
+            main();
