@@ -10,7 +10,8 @@ jobs:
     steps:
       - name: Download CloudflareST
         run: |
-          wget -q https://github.com/xiu2/CloudflareSpeedTest/releases/latest/download/CloudflareST_linux_amd64.tar.gz
+          # 锁死最稳定的官方具体版本号 v2.2.5，彻底根治 404 exit code 8 报错
+          wget -q https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz
           tar -zxf CloudflareST_linux_amd64.tar.gz
           chmod +x CloudflareST
 
