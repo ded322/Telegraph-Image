@@ -90,40 +90,61 @@ jobs:
 
             async function main() {
               try {
-                console.log("正在通过全局内存直连通道检索 Cloudflare 记录列表...");
-                const listPath = `/client/v4/zones/${zoneId}/dns_records?type=A&name=${recordName}`;
-                const resData = await cfRequest('GET', listPath);
+                const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
+                
+                // 【核心变动】不再通过 GET 查询！直接盲打发起 POST 创建请求！
+                console.log("正在尝试为您全新创建 A 记录...");
+                const createPath = `/client/v4/zones/${zoneId}/dns_records`;
+                const createRes = await cfRequest('POST', createPath, payload);
 
-                if (!resData.success) {
-                  throw new Error(`Cloudflare 接口返回错误: ${JSON.stringify(resData.errors)}`);
+                if (createRes.success) {
+                  console.log(`🎉 普天同庆！全新的 Cloudflare 解析记录已成功创建，IP为: ${bestIp}`);
+                  return;
                 }
 
-                const records = resData.result || [];
-                const payload = { type: 'A', name: recordName, content: bestIp, ttl: 120, proxied: false };
+                // 如果创建失败，检查错误代码是否为“记录已存在” (81057)
+                const errors = createRes.errors || [];
+                const isConflict = errors.some(e => e.code === 81057 || String(e.message).includes("already exists"));
 
-                // 【终极修复】使用标准的数组索引 [0]，精确提取 Cloudflare 返回列表第一项的真实记录 ID
-                if (records && records.length > 0) {
-                  const recordId = records[0].id; 
-                  console.log(`检测到已存在的解析记录 (ID: ${recordId})，正在执行覆盖更新...`);
+                if (isConflict) {
+                  console.log("检测到该域名记录在云端已存在，正在尝试强制提取冲突记录的 ID...");
+                  
+                  // 1. 尝试直接从创建失败的错误报文元数据 (meta.id) 中提取现有 ID
+                  let recordId = null;
+                  for (let err of errors) {
+                    if (err.meta && err.meta.id) {
+                      recordId = err.meta.id;
+                      break;
+                    }
+                  }
+
+                  // 2. 如果网关把元数据阉割了，我们再降级走无参数的全局 GET 并在本地进行精准过滤（百分之百稳妥）
+                  if (!recordId) {
+                    console.log("开始启用无参数全局列表检索兜底...");
+                    const backupListPath = `/client/v4/zones/${zoneId}/dns_records`;
+                    const listRes = await cfRequest('GET', backupListPath);
+                    const allRecords = listRes.result || [];
+                    const matched = allRecords.find(r => r.name === recordName && r.type === 'A');
+                    if (matched) recordId = matched.id;
+                  }
+
+                  if (!recordId) {
+                    throw new Error("未能成功获取到现有记录的有效 ID，同步中断。");
+                  }
+
+                  console.log(`成功锁定现有记录 ID: ${recordId}，开始执行强制覆盖更新...`);
                   const updatePath = `/client/v4/zones/${zoneId}/dns_records/${recordId}`;
                   const finalRes = await cfRequest('PUT', updatePath, payload);
                   
                   if (finalRes.success) {
-                    console.log(`🎉 普天同庆！Cloudflare DNS 解析记录已成功同步变更为: ${bestIp}`);
+                    console.log(`🎉 普天同庆！Cloudflare DNS 解析记录已成功覆盖变更为: ${bestIp}`);
                   } else {
                     throw new Error(`覆盖更新失败: ${JSON.stringify(finalRes.errors)}`);
                   }
                 } else {
-                  console.log("未检测到解析记录，正在为您全新创建 A 记录...");
-                  const createPath = `/client/v4/zones/${zoneId}/dns_records`;
-                  const finalRes = await cfRequest('POST', createPath, payload);
-                  
-                  if (finalRes.success) {
-                    console.log(`🎉 普天同庆！全新的 Cloudflare 解析记录已成功创建，IP为: ${bestIp}`);
-                  } else {
-                    throw new Error(`创建新记录失败: ${JSON.stringify(finalRes.errors)}`);
-                  }
+                  throw new Error(`Cloudflare 接口返回非预期错误: ${JSON.stringify(errors)}`);
                 }
+
               } catch (err) {
                 console.log(`❌ 工作流运行发生异常: ${err.message}`);
                 process.exit(1);
