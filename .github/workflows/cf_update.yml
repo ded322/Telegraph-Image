@@ -61,21 +61,56 @@ jobs:
             echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
           fi
 
+      - name: Fetch DNS Record ID from Cloudflare
+        id: cloudflare_meta
+        run: |
+          # 清理变量中可能存在的换行或首尾空格
+          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
+          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
+          
+          RESPONSE=$(curl -s -X GET "https://cloudflare.com{ZONE_ID}/dns_records?type=A&name=${{ env.DNS_RECORD_NAME }}" \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Content-Type: application/json")
+          
+          SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success')
+          echo "Cloudflare API 请求成功状态: $SUCCESS_STATUS"
+          
+          if [ "$SUCCESS_STATUS" != "true" ]; then
+            echo "Cloudflare API 返回错误！"
+            echo "$RESPONSE" | jq -r '.errors'
+            exit 1
+          fi
+          
+          # 【已修复】针对数组结构，正确提取 result 数组中第 0 项的 id
+          RECORD_ID=$(echo "$RESPONSE" | jq -r '.result[0].id // empty')
+          
+          if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ]; then
+            echo "未找到现有的 DNS 记录，接下来将尝试创建新记录。"
+            echo "record_exists=false" >> $GITHUB_OUTPUT
+          else
+            echo "找到现有的 DNS 记录 ID: $RECORD_ID"
+            echo "record_exists=true" >> $GITHUB_OUTPUT
+            echo "record_id=$RECORD_ID" >> $GITHUB_OUTPUT
+          fi
+
       - name: Update or Create Cloudflare DNS Record
         run: |
+          # 净化密钥变量
+          ZONE_ID=$(echo "${{ secrets.CF_ZONE_ID }}" | tr -d '[:space:]')
+          API_TOKEN=$(echo "${{ secrets.CF_API_TOKEN }}" | tr -d '[:space:]')
           IP_TO_UPDATE="${{ steps.speedtest.outputs.best_ip }}"
           
           if [ "${{ steps.cloudflare_meta.outputs.record_exists }}" = "true" ]; then
-            # 【已修复】更新记录的 API 地址及参数
-            curl -s -X PUT "https://cloudflare.com{{ secrets.CF_ZONE_ID }}/dns_records/${{ steps.cloudflare_meta.outputs.record_id }}" \
-              -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            echo "正在更新解析记录..."
+            curl -s -X PUT "https://cloudflare.com{ZONE_ID}/dns_records/${{ steps.cloudflare_meta.outputs.record_id }}" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
             echo "成功将解析更新为: $IP_TO_UPDATE"
           else
-            # 【已修复】创建记录的 API 地址及参数
-            curl -s -X POST "https://cloudflare.com{{ secrets.CF_ZONE_ID }}/dns_records" \
-              -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            echo "正在创建解析记录..."
+            curl -s -X POST "https://cloudflare.com{ZONE_ID}/dns_records" \
+              -H "Authorization: Bearer ${API_TOKEN}" \
               -H "Content-Type: application/json" \
               --data "{\"type\":\"A\",\"name\":\"${{ env.DNS_RECORD_NAME }}\",\"content\":\"$IP_TO_UPDATE\",\"ttl\":120,\"proxied\":false}"
             echo "成功创建新的解析记录，IP为: $IP_TO_UPDATE"
